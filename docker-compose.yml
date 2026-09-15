@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  postgres_db:
+    image: timescale/timescaledb-ha:pg16
+    container_name: geoai_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-geoai_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./data/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - postgres_data:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-geoai_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - geoai_network
+
+  redis_cache:
+    image: redis:7-alpine
+    container_name: geoai_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - geoai_network
+
+  backend:
+    build:
+      context: ./Backend
+      dockerfile: Dockerfile
+    container_name: geoai_backend
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      POSTGRES_HOST: postgres_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-geoai_db}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres_db:5432/${POSTGRES_DB:-geoai_db}
+      REDIS_HOST: redis_cache
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis_cache:6379/0
+      APP_ENV: ${APP_ENV:-development}
+      DEBUG: ${DEBUG:-True}
+      FIRMS_MAP_KEY: ${FIRMS_MAP_KEY:-}
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:5173","http://127.0.0.1:5173"]'
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+      redis_cache:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - geoai_network
+
+networks:
+  geoai_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
