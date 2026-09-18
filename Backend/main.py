@@ -1,240 +1,280 @@
 """
-main.py - Disaster Risk Assessment API
+backend/main.py - GeoAI Industrial Fire Classifier API Entrypoint
 
-- Ingests global NASA FIRMS telemetry via Firms.py
-- Evaluates spatial history and live intensity via Engine.py
-- Logs combined Moderate + High (n+h) confidence detection stats
-- Enforces strict post-calculation check (final_score >= 0.60) before caching
-- Synchronously completes dataset ingestion during boot before showing server ready banner
-- Categorizes current-day thermal anomalies into color series:
-    - Forest Fire / Wildfire -> green
-    - Industry               -> red
-    - Refinery / Gas Flare   -> yellow
-    - Other                  -> orange
-- Serves endpoints:
-    - GET  /health
-    - GET  /world-points
-    - POST /near-points (Returns top 5 nearest detections)
+Configures FastAPI lifespan management, asynchronous health probes for PostgreSQL/PostGIS
+and Redis, CORS middleware, and production-grade monitoring endpoints.
 """
 
-import asyncio
-import math
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from datetime import datetime, timezone
+import logging
+import time
+from typing import Any, AsyncGenerator, Dict, List, Optional
+
+from fastapi import APIRouter, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+import redis.asyncio as aioredis
+from sqlalchemy import text
 
-from Engine import scoring_engine
-from Firms import calculate_history_and_redundancy, fetch_live_firms_data
+from config import settings
+from database import engine
+from schemas import SystemHealthResponse
 
-# In-Memory Cache categorized by source type color buckets
-PROCESSED_CACHE: dict[str, list[dict] | dict[str, list[dict]]] = {
-    "all_points": [],
-    "series": {
-        "green": [],   # Forest Fires / Wildfires
-        "red": [],     # Industrial Facilities
-        "yellow": [],  # Refineries / Gas Flares
-        "orange": []   # Other / Unclassified Active Threats
-    }
-}
-
-
-def classify_detection_source(frp: float, active_days: int, score: float) -> tuple[str, str]:
-    """
-    Classifies detection type and returns (source_type, color_key):
-    - forest_fire: Transient active fire (<4 active days) -> green
-    - refinery: Persistent heat (>=4 active days) + High FRP (>=80 MW) -> yellow
-    - industry: Persistent heat (>=4 active days) + Standard FRP (<80 MW) -> red
-    - other: Fallback active threat -> orange
-    """
-    if active_days < 4:
-        return "forest_fire", "green"
-    elif frp >= 80.0:
-        return "refinery", "yellow"
-    elif active_days >= 4:
-        return "industry", "red"
-    return "other", "orange"
-
-
-async def run_pipeline(is_initial_boot: bool = False) -> None:
-    """Ingests 5-day telemetry, evaluates source classification, and strictly caches points with final_score >= 0.60."""
-    print("[Pipeline] Executing ingestion & scoring cycle...")
-
-    raw_telemetry = await fetch_live_firms_data(days=5)
-    if not raw_telemetry:
-        print("[Pipeline Warning] No telemetry ingested. Skipping cycle.")
-        return
-
-    # Calculate combined Moderate ('n') + High ('h') confidence detections
-    total_raw = len(raw_telemetry)
-    mod_high_count = sum(1 for pt in raw_telemetry if pt.get("confidence") in ("n", "h"))
-    mod_high_pct = round((mod_high_count / total_raw) * 100, 2) if total_raw > 0 else 0.0
-
-    print(f"[Pipeline Stats] Ingested {total_raw} total raw global records.")
-    print(f"[Pipeline Stats] Moderate + High (n+h) Confidence Points: {mod_high_count} ({mod_high_pct}%)")
-
-    # Identify the latest acquisition date in the batch (current day)
-    latest_date = max(item["acq_date"] for item in raw_telemetry if item.get("acq_date"))
-    print(f"[Pipeline] Filtering telemetry for latest acquisition date ({latest_date})...")
-
-    # Isolate current-day events ONLY
-    current_day_events = [pt for pt in raw_telemetry if pt.get("acq_date") == latest_date]
-
-    new_series: dict[str, list[dict]] = {
-        "green": [],
-        "red": [],
-        "yellow": [],
-        "orange": []
-    }
-    all_evaluated = []
-
-    for item in current_day_events:
-        # Rescale FRP intensity: 25+ MW reaches 1.0 (100% intensity)
-        s_live = min(1.0, round(item["frp"] / 25.0, 2))
-        s_hist, penalty_multiplier, active_days = calculate_history_and_redundancy(item["lat"], item["lng"])
-        s_osm = 0.60  # Baseline OSM vulnerability score
-
-        score_res = scoring_engine.calculate_score(s_live, s_hist, s_osm)
-        raw_composite = score_res["composite_score"]
-
-        # Source classification & target color key assignment
-        source_type, color_key = classify_detection_source(item["frp"], active_days, raw_composite)
-
-        # Apply redundancy penalty for non-wildfire display score
-        penalized_composite = round(raw_composite * penalty_multiplier, 4)
-        final_score = raw_composite if source_type == "forest_fire" else penalized_composite
-
-        # STRICT POST-CALCULATION CHECK: Drop ANY point where final_score is below 0.60
-        if final_score < 0.60:
-            continue
-
-        evaluated_pt = {
-            "id": item["id"],
-            "name": f"{source_type.replace('_', ' ').title()} ({item['lat']:.2f}, {item['lng']:.2f})",
-            "lat": item["lat"],
-            "lng": item["lng"],
-            "type": source_type,
-            "frp_mw": item["frp"],
-            "score": final_score,
-            "acq_date": item["acq_date"],
-            "active_days_5d": active_days,
-            "redundancy_penalized": penalty_multiplier < 1.0,
-            "score_breakdown": score_res["components"]
-        }
-
-        # Store only post-check validated points
-        all_evaluated.append(evaluated_pt)
-        new_series[color_key].append(evaluated_pt)
-
-    PROCESSED_CACHE["all_points"] = all_evaluated
-    PROCESSED_CACHE["series"] = new_series
-    print(
-        f"[Pipeline] Cycle complete. Filtered down to {len(all_evaluated)} "
-        f"points strictly meeting final_score >= 0.60 for current date ({latest_date})."
-    )
-
-
-async def firms_cron_worker() -> None:
-    """Background polling worker executing every 45 minutes."""
-    while True:
-        await asyncio.sleep(2700)  # 45 minutes
-        try:
-            await run_pipeline()
-        except Exception as err:
-            print(f"[Cron Error] Scheduled ingestion failed: {err}")
+# Configure structured application logging
+logging.basicConfig(
+    level=logging.INFO if not settings.DEBUG else logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] [%(name)s]: %(message)s",
+)
+logger = logging.getLogger("geoai_api")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("============================================================")
-    print("[Startup] Initializing Disaster Risk Assessment API...")
-    print("[Startup] Starting initial NASA FIRMS dataset ingestion & scoring...")
-    print("============================================================")
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """
+    Application lifespan manager.
+    Validates PostgreSQL + PostGIS extension and Redis connectivity on boot.
+    Gracefully disposes connections on shutdown.
+    """
+    logger.info("Initializing %s (Env: %s)...", settings.APP_NAME, settings.APP_ENV)
 
-    # Synchronously await initial pipeline execution to complete ingestion & filtering BEFORE logging startup ready
-    await run_pipeline(is_initial_boot=True)
+    # 1. Initialize and probe Redis connection
+    redis_client = aioredis.from_url(
+        settings.REDIS_URL,
+        encoding="utf-8",
+        decode_responses=True,
+        socket_connect_timeout=3,
+    )
+    app.state.redis = redis_client
 
-    poller_task = asyncio.create_task(firms_cron_worker())
+    try:
+        await redis_client.ping()
+        logger.info("Redis cache connection established successfully.")
+    except Exception as exc:
+        logger.warning("Redis initial ping check warning: %s", exc)
 
-    print("============================================================")
-    print("[Startup] Initial dataset ingestion and filtering cycle complete.")
-    print(f"[Startup] Cache primed with {len(PROCESSED_CACHE['all_points'])} points (strictly score >= 0.60).")
-    print("[Startup] Background poller scheduled (every 45m).")
-    print("[Startup] Disaster Risk Assessment API is FULLY READY!")
-    print("============================================================")
+    # 2. Probe PostgreSQL and verify PostGIS extension
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1;"))
+            result = await conn.execute(text("SELECT PostGIS_Version();"))
+            postgis_ver = result.scalar()
+            logger.info("PostgreSQL connected successfully. PostGIS Version: %s", postgis_ver)
+    except Exception as exc:
+        logger.warning("PostgreSQL/PostGIS initial ping check warning: %s", exc)
+
+    logger.info("System startup sequence completed.")
 
     yield
 
-    poller_task.cancel()
+    # Shutdown sequence
+    logger.info("Executing graceful shutdown...")
+    if hasattr(app.state, "redis") and app.state.redis:
+        await app.state.redis.aclose()
+        logger.info("Redis connection pool closed.")
+
+    await engine.dispose()
+    logger.info("SQLAlchemy database connection engine disposed.")
 
 
 app = FastAPI(
-    title="Disaster Risk Assessment API",
+    title=settings.APP_NAME,
+    description="GeoAI Industrial Fire Classifier - Remote Sensing Anomaly Detection & Facility Attribution",
     version="1.0.0",
-    lifespan=lifespan
+    debug=settings.DEBUG,
+    lifespan=lifespan,
 )
 
+# ------------------------------------------------------------------------------
+# CORS Middleware
+# ------------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-class LocationQuery(BaseModel):
-    lat: float = Field(..., description="Latitude")
-    lng: float = Field(..., description="Longitude")
-
-
-def calculate_haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371.0  # Earth's radius in kilometers
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
-    )
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
+# ------------------------------------------------------------------------------
+# API V1 Router
+# ------------------------------------------------------------------------------
+api_v1_router = APIRouter(prefix=settings.API_V1_STR)
 
 
-@app.get("/health")
-def health_check():
-    """Health status check returning total count of processed active threat points."""
-    return {
-        "status": "healthy",
-        "cached_classified_points": len(PROCESSED_CACHE["all_points"])
+@api_v1_router.get(
+    "/health",
+    response_model=SystemHealthResponse,
+    status_code=status.HTTP_200_OK,
+    summary="System Health & Infrastructure Diagnostics",
+    description="Probes PostgreSQL, PostGIS extension, and Redis cache with active latency measurement.",
+)
+async def health_check() -> JSONResponse:
+    """Active diagnostic probe evaluating infrastructure components."""
+    now_utc = datetime.now(timezone.utc)
+    db_status: Dict[str, Any] = {"status": "unhealthy", "latency_ms": None}
+    redis_status: Dict[str, Any] = {"status": "unhealthy", "latency_ms": None}
+
+    # 1. Probe Database & PostGIS
+    db_start = time.perf_counter()
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1;"))
+            postgis_result = await conn.execute(text("SELECT PostGIS_Version();"))
+            postgis_version = postgis_result.scalar()
+            db_latency = round((time.perf_counter() - db_start) * 1000, 2)
+            db_status = {
+                "status": "connected",
+                "latency_ms": db_latency,
+                "postgis_version": postgis_version,
+            }
+    except Exception as exc:
+        db_status = {
+            "status": "error",
+            "error": str(exc),
+            "latency_ms": round((time.perf_counter() - db_start) * 1000, 2),
+        }
+
+    # 2. Probe Redis
+    redis_start = time.perf_counter()
+    try:
+        redis_conn = getattr(app.state, "redis", None)
+        if redis_conn:
+            await redis_conn.ping()
+            redis_latency = round((time.perf_counter() - redis_start) * 1000, 2)
+            redis_status = {
+                "status": "connected",
+                "latency_ms": redis_latency,
+            }
+        else:
+            redis_status = {"status": "not_initialized"}
+    except Exception as exc:
+        redis_status = {
+            "status": "error",
+            "error": str(exc),
+            "latency_ms": round((time.perf_counter() - redis_start) * 1000, 2),
+        }
+
+    # Determine overall system health state
+    is_db_ok = db_status.get("status") == "connected"
+    is_redis_ok = redis_status.get("status") == "connected"
+
+    if is_db_ok and is_redis_ok:
+        overall_status = "healthy"
+        http_status = status.HTTP_200_OK
+    elif is_db_ok or is_redis_ok:
+        overall_status = "degraded"
+        http_status = status.HTTP_200_OK
+    else:
+        overall_status = "unhealthy"
+        http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    payload = {
+        "status": overall_status,
+        "timestamp": now_utc.isoformat(),
+        "app_name": settings.APP_NAME,
+        "environment": settings.APP_ENV,
+        "database": db_status,
+        "redis": redis_status,
     }
+    return JSONResponse(content=payload, status_code=http_status)
 
 
-@app.get("/world-points")
-def get_world_points():
-    """Returns global threat points grouped by source classification color keys (green, red, yellow, orange)."""
-    return PROCESSED_CACHE["series"]
+@api_v1_router.post(
+    "/telemetry/ingest",
+    status_code=status.HTTP_200_OK,
+    summary="Trigger Satellite Telemetry Ingestion (Layer 1)",
+    description="Fetches live FIRMS thermal telemetry, executes DEFM footprint modeling, calculates H3 indexes, and upserts to TimescaleDB.",
+)
+async def trigger_ingest(
+    source: str = "VIIRS_SNPP_NRT",
+    day_range: int = 1,
+) -> Dict[str, Any]:
+    """Manually or worker-triggered satellite telemetry ingestion."""
+    from ingestion import firms_ingestion_engine
+    try:
+        result = await firms_ingestion_engine.ingest_and_store(
+            source=source, day_range=day_range
+        )
+        return result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Telemetry ingestion failed: {str(exc)}",
+        )
 
 
-@app.post("/near-points")
-def get_near_points(query: LocationQuery):
-    """Calculates distance to all cached detections and returns the 5 nearest points."""
-    all_pts = PROCESSED_CACHE.get("all_points", [])
-    evaluated_points = []
+@api_v1_router.post(
+    "/pipeline/run-deterministic",
+    status_code=status.HTTP_200_OK,
+    summary="Trigger Layer 2 & Layer 3 Deterministic Pipeline",
+    description="Processes unclassified incidents through Known-Emitter Registry Fast-Path and Dual-Band Planck Pyrometry.",
+)
+async def trigger_pipeline(
+    batch_limit: int = 100,
+) -> Dict[str, Any]:
+    """Manually or worker-triggered Layer 2/3 classification run."""
+    from pipeline import deterministic_pipeline
+    try:
+        result = await deterministic_pipeline.run_batch(batch_limit=batch_limit)
+        return result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Pipeline processing failed: {str(exc)}",
+        )
 
-    for pt in all_pts:
-        dist = calculate_haversine_distance(query.lat, query.lng, pt["lat"], pt["lng"])
-        pt_copy = dict(pt)
-        pt_copy["distance_km"] = round(dist, 2)
-        evaluated_points.append(pt_copy)
 
-    # Sort strictly ascending by physical proximity
-    evaluated_points.sort(key=lambda x: x["distance_km"])
+@api_v1_router.get(
+    "/incidents",
+    summary="List Thermal Incidents",
+    description="Queries ingested satellite thermal incidents with pagination.",
+)
+async def list_incidents(
+    limit: int = 50,
+    classification: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Retrieve recent satellite thermal incidents from TimescaleDB."""
+    from database import ThermalIncident, async_session_factory
+    from sqlalchemy import select, desc
 
-    # Slice top 5 nearest points
-    nearest_5_points = evaluated_points[:5]
+    async with async_session_factory() as session:
+        query = select(ThermalIncident).order_by(desc(ThermalIncident.detected_at)).limit(limit)
+        if classification:
+            query = query.filter(ThermalIncident.classification == classification)
+        result = await session.execute(query)
+        incidents = result.scalars().all()
+        return {
+            "total": len(incidents),
+            "items": [
+                {
+                    "id": str(inc.id),
+                    "detected_at": inc.detected_at.isoformat(),
+                    "latitude": inc.latitude,
+                    "longitude": inc.longitude,
+                    "h3_index": inc.h3_index,
+                    "brightness": inc.brightness,
+                    "frp": inc.frp,
+                    "satellite": inc.satellite,
+                    "confidence": inc.confidence,
+                    "classification": inc.classification,
+                    "classification_confidence": inc.classification_confidence,
+                    "is_industrial": inc.is_industrial,
+                }
+                for inc in incidents
+            ],
+        }
 
+
+# Mount routers
+app.include_router(api_v1_router)
+
+
+@app.get("/", tags=["Root"])
+async def root_ping() -> Dict[str, str]:
+    """Root meta information ping."""
     return {
-        "query": query.model_dump(),
-        "count": len(nearest_5_points),
-        "points": nearest_5_points
+        "app": settings.APP_NAME,
+        "version": "1.0.0",
+        "health_endpoint": f"{settings.API_V1_STR}/health",
     }
