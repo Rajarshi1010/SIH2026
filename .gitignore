@@ -39,6 +39,9 @@ venv.bak/
 .env.*
 !.env.example
 
+# Specifications & Internal Docs
+spec.md
+
 # IDE & Editor Configurations
 .idea/
 .vscode/
