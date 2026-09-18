@@ -4,6 +4,163 @@ import InteractiveWorldGroup from "./components/InteractiveWorldGroup";
 import LeafletMapSection from "./components/LeafletMapSection";
 import { fetchWorldPoints } from "./api";
 
+
+const exportThreatAsPdf = (point) => {
+  const reportWindow = window.open("", "_blank", "width=900,height=700");
+
+  if (!reportWindow) {
+    alert("Please allow pop-ups to export the PDF.");
+    return;
+  }
+
+  const score = point.score != null
+    ? `${(point.score * 100).toFixed(1)}%`
+    : "--";
+
+  const scoreBreakdown = point.score_breakdown
+    ? JSON.stringify(point.score_breakdown)
+    : "--";
+
+  reportWindow.document.write(`
+    <!doctype html>
+    <html>
+      <head>
+        <title>${point.name || "Thermal Threat"} - Agnikavach Report</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            color: #17202a;
+            padding: 40px;
+          }
+
+          h1 {
+            color: #d97706;
+            margin-bottom: 4px;
+          }
+
+          h2 {
+            margin-top: 30px;
+            border-bottom: 2px solid #f59e0b;
+            padding-bottom: 8px;
+          }
+
+          .subtitle {
+            color: #667085;
+            margin-bottom: 28px;
+          }
+
+          .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+          }
+
+          .field {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 14px;
+          }
+
+          .label {
+            display: block;
+            color: #667085;
+            font-size: 12px;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+          }
+
+          .value {
+            font-size: 15px;
+            font-weight: 600;
+            word-break: break-word;
+          }
+
+          .footer {
+            margin-top: 36px;
+            color: #667085;
+            font-size: 12px;
+          }
+        </style>
+      </head>
+
+      <body>
+        <h1>AGNIKAVACH</h1>
+        <div class="subtitle">Backend Thermal Threat Assessment</div>
+
+        <h2>${point.name || "Thermal Anomaly"}</h2>
+
+        <div class="grid">
+          <div class="field">
+            <span class="label">Backend ID</span>
+            <span class="value">${point.id ?? "--"}</span>
+          </div>
+
+          <div class="field">
+            <span class="label">Classification</span>
+            <span class="value">${point.type ?? point.categoryLabel ?? "--"}</span>
+          </div>
+
+          <div class="field">
+            <span class="label">Latitude</span>
+            <span class="value">${point.lat ?? "--"}°</span>
+          </div>
+
+          <div class="field">
+            <span class="label">Longitude</span>
+            <span class="value">${point.lng ?? "--"}°</span>
+          </div>
+
+          <div class="field">
+            <span class="label">Radiative Power</span>
+            <span class="value">${point.frp_mw ?? "--"} MW</span>
+          </div>
+
+          <div class="field">
+            <span class="label">Risk Score</span>
+            <span class="value">${score}</span>
+          </div>
+
+          <div class="field">
+            <span class="label">Active Days in 5-Day Window</span>
+            <span class="value">${point.active_days_5d ?? "--"}</span>
+          </div>
+
+          <div class="field">
+            <span class="label">Redundancy Penalized</span>
+            <span class="value">${point.redundancy_penalized ? "Yes" : "No"}</span>
+          </div>
+
+          <div class="field">
+            <span class="label">Acquisition Date</span>
+            <span class="value">${point.acq_date ?? "--"}</span>
+          </div>
+
+          <div class="field">
+            <span class="label">Distance</span>
+            <span class="value">${point.distance_km != null ? `${point.distance_km} km` : "--"}</span>
+          </div>
+
+          <div class="field" style="grid-column: 1 / -1;">
+            <span class="label">Score Breakdown</span>
+            <span class="value">${scoreBreakdown}</span>
+          </div>
+        </div>
+
+        <div class="footer">
+          Generated from the selected backend thermal anomaly record on
+          ${new Date().toLocaleString()}.
+        </div>
+      </body>
+    </html>
+  `);
+
+  reportWindow.document.close();
+  reportWindow.focus();
+
+  setTimeout(() => {
+    reportWindow.print();
+  }, 300);
+};
 export default function App() {
   const scrollProgressRef = useRef(0);
   const targetProgressRef = useRef(0); // Holds the target scroll destination
@@ -12,7 +169,7 @@ export default function App() {
   const [heroProgress, setHeroProgress] = useState(0);
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
-  const [backendStatus, setBackendStatus] = useState("idle"); 
+  const [backendStatus, setBackendStatus] = useState("idle");
   const [fireList, setFireList] = useState([]);
   const [worldPoints, setWorldPoints] = useState([]);
   const [osmBackendStatus, setOsmBackendStatus] = useState("loading");
@@ -74,10 +231,10 @@ export default function App() {
     const updatePhysics = () => {
       const current = scrollProgressRef.current;
       const target = targetProgressRef.current;
-      
+
       // Smooth dampening factor (0.08 gives a weightful, glided roll)
       const diff = target - current;
-      
+
       if (Math.abs(diff) > 0.0001) {
         scrollProgressRef.current += diff * 0.08;
       } else {
@@ -109,7 +266,7 @@ export default function App() {
 
         const delta = e.deltaY * 0.0015;
         const nextTarget = Math.min(1, Math.max(0, currentTarget + delta));
-        
+
         targetProgressRef.current = nextTarget;
       }
     };
@@ -163,9 +320,9 @@ export default function App() {
   });
 
   return (
-    <div style={{ 
-      color: '#ffffff', 
-      position: 'relative', 
+    <div style={{
+      color: '#ffffff',
+      position: 'relative',
       overflowX: 'hidden',
       backgroundColor: '#030205',
       backgroundImage: `
@@ -189,7 +346,7 @@ export default function App() {
         justifyContent: 'center',
         background: 'radial-gradient(circle at 65% 50%, rgba(185, 28, 28, 0.12) 0%, rgba(154, 26, 26, 0.04) 40%, rgba(3, 2, 5, 0.85) 80%)'
       }}>
-        
+
         {/* Title & Primary Copy Overlay */}
         <div style={{
           position: 'absolute',
@@ -244,7 +401,7 @@ export default function App() {
           </p>
 
           <div style={{ display: 'flex', alignItems: 'center' }}>
-            <button 
+            <button
               onClick={handleScanClick}
               style={{
                 background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(239, 68, 68, 0.2))',
@@ -302,38 +459,39 @@ export default function App() {
         </div>
 
         {/* 3D Canvas Layer */}
-        <div style={{ 
-          position: 'absolute', 
-          inset: 0, 
-          zIndex: 0, 
+        <div style={{
+          position: 'absolute',
+          inset: 0,
+          zIndex: 0,
           pointerEvents: 'none',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           transform: 'translateX(4vw)'
         }}>
-          <Canvas 
-            camera={{ position: [0, 0, 14], fov: 45 }} 
+          <Canvas
+            camera={{ position: [0, 0, 14], fov: 45 }}
             shadows={false}
             gl={{ alpha: true, antialias: true }}
             style={{ pointerEvents: 'auto', width: '100%', height: '100%' }}
           >
             <ambientLight intensity={1.8} />
-            <directionalLight 
-              position={[0, 10, 10]} 
-              intensity={1.5} 
-              castShadow={false} 
+            <directionalLight
+              position={[0, 10, 10]}
+              intensity={1.5}
+              castShadow={false}
             />
-            
+
             <React.Suspense fallback={null}>
-              <InteractiveWorldGroup 
-                scrollProgressRef={scrollProgressRef} 
+              <InteractiveWorldGroup
+                scrollProgressRef={scrollProgressRef}
                 onProgressChange={setHeroProgress}
                 onBackendStatusChange={setBackendStatus}
                 selectedPointId={expandedId}
                 onSelectPoint={(id) => setExpandedId(id)}
                 onFiresFetched={(points) => {
                   const formatted = points.slice(0, 5).map((pt, index) => ({
+                    rawPoint: pt,
                     id: pt.id || index + 1,
                     title: pt.name || `Thermal Anomaly #${index + 1}`,
                     distance: `${pt.distance_km.toFixed(1)} km away`,
@@ -552,6 +710,40 @@ export default function App() {
                           <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block' }}>First Detected</span>
                           <strong>{fire.detectedAt}</strong>
                         </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            exportThreatAsPdf(fire.rawPoint || fire);
+                          }}
+                          style={{
+                            gridColumn: '1 / -1',
+                            width: '100%',
+                            marginTop: '4px',
+                            padding: '12px 16px',
+                            borderRadius: '8px',
+                            border: '1px solid rgba(245, 158, 11, 0.75)',
+                            background: 'rgba(245, 158, 11, 0.10)',
+                            color: '#fbbf24',
+                            fontSize: '0.78rem',
+                            fontWeight: 700,
+                            letterSpacing: '0.12em',
+                            textTransform: 'uppercase',
+                            cursor: 'pointer',
+                            transition: 'all 0.25s ease',
+                            boxShadow: '0 0 14px rgba(245, 158, 11, 0.10)'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = 'rgba(245, 158, 11, 0.22)';
+                            e.currentTarget.style.boxShadow = '0 0 20px rgba(245, 158, 11, 0.28)';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = 'rgba(245, 158, 11, 0.10)';
+                            e.currentTarget.style.boxShadow = '0 0 14px rgba(245, 158, 11, 0.10)';
+                          }}
+                        >
+                          ↓ Export as PDF
+                        </button>
                       </div>
                     )}
                   </div>
@@ -666,7 +858,7 @@ export default function App() {
                   <div style={{ fontSize: '1.05rem', fontWeight: 600, color: '#ffffff' }}>
                     {selectedThreatPoint.name || 'Selected Threat'}
                   </div>
-                  <button 
+                  <button
                     onClick={() => setSelectedThreatPoint(null)}
                     style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: '1rem' }}
                   >
@@ -706,6 +898,39 @@ export default function App() {
                     <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block', marginBottom: '4px' }}>Detection Timestamp</span>
                     <strong>{selectedThreatPoint.acq_date || 'Live Stream / Recent Pass'}</strong>
                   </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      exportThreatAsPdf(selectedThreatPoint);
+                    }}
+                    style={{
+                      width: '100%',
+                      marginTop: '4px',
+                      padding: '12px 16px',
+                      borderRadius: '8px',
+                      border: '1px solid rgba(245, 158, 11, 0.75)',
+                      background: 'rgba(245, 158, 11, 0.10)',
+                      color: '#fbbf24',
+                      fontSize: '0.78rem',
+                      fontWeight: 700,
+                      letterSpacing: '0.12em',
+                      textTransform: 'uppercase',
+                      cursor: 'pointer',
+                      transition: 'all 0.25s ease',
+                      boxShadow: '0 0 14px rgba(245, 158, 11, 0.10)'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'rgba(245, 158, 11, 0.22)';
+                      e.currentTarget.style.boxShadow = '0 0 20px rgba(245, 158, 11, 0.28)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'rgba(245, 158, 11, 0.10)';
+                      e.currentTarget.style.boxShadow = '0 0 14px rgba(245, 158, 11, 0.10)';
+                    }}
+                  >
+                    ↓ Export as PDF
+                  </button>
                 </div>
               </div>
             ) : (
@@ -734,17 +959,17 @@ export default function App() {
               borderRadius: '14px',
               padding: '18px 20px'
             }}>
-              <h3 style={{ 
-                margin: '0 0 10px 0', 
+              <h3 style={{
+                margin: '0 0 10px 0',
                 fontFamily: "'Baumans', cursive",
                 fontSize: '1.1rem',
-                color: '#f59e0b', 
+                color: '#f59e0b',
                 letterSpacing: '0.05em',
                 textTransform: 'uppercase'
               }}>
                 Threat Legend
               </h3>
-              
+
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                   <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 8px rgba(34, 197, 94, 0.6)' }} />
