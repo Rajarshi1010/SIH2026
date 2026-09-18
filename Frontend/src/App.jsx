@@ -5,162 +5,6 @@ import LeafletMapSection from "./components/LeafletMapSection";
 import { fetchWorldPoints } from "./api";
 
 
-const exportThreatAsPdf = (point) => {
-  const reportWindow = window.open("", "_blank", "width=900,height=700");
-
-  if (!reportWindow) {
-    alert("Please allow pop-ups to export the PDF.");
-    return;
-  }
-
-  const score = point.score != null
-    ? `${(point.score * 100).toFixed(1)}%`
-    : "--";
-
-  const scoreBreakdown = point.score_breakdown
-    ? JSON.stringify(point.score_breakdown)
-    : "--";
-
-  reportWindow.document.write(`
-    <!doctype html>
-    <html>
-      <head>
-        <title>${point.name || "Thermal Threat"} - Agnikavach Report</title>
-        <style>
-          body {
-            font-family: Arial, sans-serif;
-            color: #17202a;
-            padding: 40px;
-          }
-
-          h1 {
-            color: #d97706;
-            margin-bottom: 4px;
-          }
-
-          h2 {
-            margin-top: 30px;
-            border-bottom: 2px solid #f59e0b;
-            padding-bottom: 8px;
-          }
-
-          .subtitle {
-            color: #667085;
-            margin-bottom: 28px;
-          }
-
-          .grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 16px;
-          }
-
-          .field {
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            padding: 14px;
-          }
-
-          .label {
-            display: block;
-            color: #667085;
-            font-size: 12px;
-            margin-bottom: 6px;
-            text-transform: uppercase;
-          }
-
-          .value {
-            font-size: 15px;
-            font-weight: 600;
-            word-break: break-word;
-          }
-
-          .footer {
-            margin-top: 36px;
-            color: #667085;
-            font-size: 12px;
-          }
-        </style>
-      </head>
-
-      <body>
-        <h1>AGNIKAVACH</h1>
-        <div class="subtitle">Backend Thermal Threat Assessment</div>
-
-        <h2>${point.name || "Thermal Anomaly"}</h2>
-
-        <div class="grid">
-          <div class="field">
-            <span class="label">Backend ID</span>
-            <span class="value">${point.id ?? "--"}</span>
-          </div>
-
-          <div class="field">
-            <span class="label">Classification</span>
-            <span class="value">${point.type ?? point.categoryLabel ?? "--"}</span>
-          </div>
-
-          <div class="field">
-            <span class="label">Latitude</span>
-            <span class="value">${point.lat ?? "--"}°</span>
-          </div>
-
-          <div class="field">
-            <span class="label">Longitude</span>
-            <span class="value">${point.lng ?? "--"}°</span>
-          </div>
-
-          <div class="field">
-            <span class="label">Radiative Power</span>
-            <span class="value">${point.frp_mw ?? "--"} MW</span>
-          </div>
-
-          <div class="field">
-            <span class="label">Risk Score</span>
-            <span class="value">${score}</span>
-          </div>
-
-          <div class="field">
-            <span class="label">Active Days in 5-Day Window</span>
-            <span class="value">${point.active_days_5d ?? "--"}</span>
-          </div>
-
-          <div class="field">
-            <span class="label">Redundancy Penalized</span>
-            <span class="value">${point.redundancy_penalized ? "Yes" : "No"}</span>
-          </div>
-
-          <div class="field">
-            <span class="label">Acquisition Date</span>
-            <span class="value">${point.acq_date ?? "--"}</span>
-          </div>
-
-          <div class="field">
-            <span class="label">Distance</span>
-            <span class="value">${point.distance_km != null ? `${point.distance_km} km` : "--"}</span>
-          </div>
-
-          <div class="field" style="grid-column: 1 / -1;">
-            <span class="label">Score Breakdown</span>
-            <span class="value">${scoreBreakdown}</span>
-          </div>
-        </div>
-
-        <div class="footer">
-          Generated from the selected backend thermal anomaly record on
-          ${new Date().toLocaleString()}.
-        </div>
-      </body>
-    </html>
-  `);
-
-  reportWindow.document.close();
-  reportWindow.focus();
-
-  setTimeout(() => {
-    reportWindow.print();
-  }, 300);
-};
 export default function App() {
   const scrollProgressRef = useRef(0);
   const targetProgressRef = useRef(0); // Holds the target scroll destination
@@ -491,7 +335,6 @@ export default function App() {
                 onSelectPoint={(id) => setExpandedId(id)}
                 onFiresFetched={(points) => {
                   const formatted = points.slice(0, 5).map((pt, index) => ({
-                    rawPoint: pt,
                     id: pt.id || index + 1,
                     title: pt.name || `Thermal Anomaly #${index + 1}`,
                     distance: `${pt.distance_km.toFixed(1)} km away`,
@@ -714,7 +557,7 @@ export default function App() {
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            exportThreatAsPdf(fire.rawPoint || fire);
+                            console.info(`PDF export selected for ${fire.title}`);
                           }}
                           style={{
                             gridColumn: '1 / -1',
@@ -900,9 +743,8 @@ export default function App() {
                   </div>
                   <button
                     type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      exportThreatAsPdf(selectedThreatPoint);
+                    onClick={() => {
+                      console.info("PDF export will be available soon.");
                     }}
                     style={{
                       width: '100%',
