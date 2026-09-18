@@ -9,9 +9,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from fastapi import APIRouter, FastAPI, status
+from fastapi import APIRouter, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import redis.asyncio as aioredis
@@ -178,6 +178,92 @@ async def health_check() -> JSONResponse:
         "redis": redis_status,
     }
     return JSONResponse(content=payload, status_code=http_status)
+
+
+@api_v1_router.post(
+    "/telemetry/ingest",
+    status_code=status.HTTP_200_OK,
+    summary="Trigger Satellite Telemetry Ingestion (Layer 1)",
+    description="Fetches live FIRMS thermal telemetry, executes DEFM footprint modeling, calculates H3 indexes, and upserts to TimescaleDB.",
+)
+async def trigger_ingest(
+    source: str = "VIIRS_SNPP_NRT",
+    day_range: int = 1,
+) -> Dict[str, Any]:
+    """Manually or worker-triggered satellite telemetry ingestion."""
+    from ingestion import firms_ingestion_engine
+    try:
+        result = await firms_ingestion_engine.ingest_and_store(
+            source=source, day_range=day_range
+        )
+        return result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Telemetry ingestion failed: {str(exc)}",
+        )
+
+
+@api_v1_router.post(
+    "/pipeline/run-deterministic",
+    status_code=status.HTTP_200_OK,
+    summary="Trigger Layer 2 & Layer 3 Deterministic Pipeline",
+    description="Processes unclassified incidents through Known-Emitter Registry Fast-Path and Dual-Band Planck Pyrometry.",
+)
+async def trigger_pipeline(
+    batch_limit: int = 100,
+) -> Dict[str, Any]:
+    """Manually or worker-triggered Layer 2/3 classification run."""
+    from pipeline import deterministic_pipeline
+    try:
+        result = await deterministic_pipeline.run_batch(batch_limit=batch_limit)
+        return result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Pipeline processing failed: {str(exc)}",
+        )
+
+
+@api_v1_router.get(
+    "/incidents",
+    summary="List Thermal Incidents",
+    description="Queries ingested satellite thermal incidents with pagination.",
+)
+async def list_incidents(
+    limit: int = 50,
+    classification: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Retrieve recent satellite thermal incidents from TimescaleDB."""
+    from database import ThermalIncident, async_session_factory
+    from sqlalchemy import select, desc
+
+    async with async_session_factory() as session:
+        query = select(ThermalIncident).order_by(desc(ThermalIncident.detected_at)).limit(limit)
+        if classification:
+            query = query.filter(ThermalIncident.classification == classification)
+        result = await session.execute(query)
+        incidents = result.scalars().all()
+        return {
+            "total": len(incidents),
+            "items": [
+                {
+                    "id": str(inc.id),
+                    "detected_at": inc.detected_at.isoformat(),
+                    "latitude": inc.latitude,
+                    "longitude": inc.longitude,
+                    "h3_index": inc.h3_index,
+                    "brightness": inc.brightness,
+                    "frp": inc.frp,
+                    "satellite": inc.satellite,
+                    "confidence": inc.confidence,
+                    "classification": inc.classification,
+                    "classification_confidence": inc.classification_confidence,
+                    "is_industrial": inc.is_industrial,
+                }
+                for inc in incidents
+            ],
+        }
 
 
 # Mount routers
