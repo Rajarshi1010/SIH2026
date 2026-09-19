@@ -1,14 +1,18 @@
-import React, { useRef, useState, useEffect } from "react";
+import React, { useRef, useState, useEffect, useMemo, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
 import InteractiveWorldGroup from "./components/InteractiveWorldGroup";
 import LeafletMapSection from "./components/LeafletMapSection";
+import ImpactAnalysisPanel from "./components/ImpactAnalysisPanel";
+import { generateMockAssets, getImpactSummary } from "./data/mockImpactAssets";
 import { fetchWorldPoints } from "./api";
+import { MapPin } from "lucide-react";
 
 
 export default function App() {
   const scrollProgressRef = useRef(0);
   const targetProgressRef = useRef(0); // Holds the target scroll destination
   const animFrameIdRef = useRef(null);
+  const mapSectionRef = useRef(null);
 
   const [heroProgress, setHeroProgress] = useState(0);
   const [isUnlocked, setIsUnlocked] = useState(false);
@@ -19,6 +23,76 @@ export default function App() {
   const [osmBackendStatus, setOsmBackendStatus] = useState("loading");
   const [selectedThreatPoint, setSelectedThreatPoint] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
+
+  // Impact Analysis state
+  const [isImpactActive, setIsImpactActive] = useState(false);
+  const [impactRadius, setImpactRadius] = useState(5);
+
+  // Generate mock assets for the selected threat (deterministic, memoized)
+  const impactAssets = useMemo(() => {
+    if (!selectedThreatPoint) return [];
+    return generateMockAssets(selectedThreatPoint.lat, selectedThreatPoint.lng);
+  }, [selectedThreatPoint]);
+
+  // Filtered assets for the current radius
+  const impactSummary = useMemo(() => {
+    if (!isImpactActive || impactAssets.length === 0) return null;
+    return getImpactSummary(impactAssets, impactRadius);
+  }, [isImpactActive, impactAssets, impactRadius]);
+
+  const impactFilteredAssets = impactSummary?.filteredAssets || [];
+
+  // Deactivate impact analysis when threat is deselected
+  useEffect(() => {
+    if (!selectedThreatPoint) {
+      setIsImpactActive(false);
+    }
+  }, [selectedThreatPoint]);
+
+  const handleImpactToggle = useCallback((active) => {
+    setIsImpactActive(active);
+  }, []);
+
+  const handleRadiusChange = useCallback((radius) => {
+    setImpactRadius(radius);
+  }, []);
+
+  // State for triggering map fly-to from outside the map component
+  const [flyToTarget, setFlyToTarget] = useState(null);
+
+  // Handler for "View on Map" from Top 5 anomaly cards
+  const handleLocateOnMap = useCallback((fire) => {
+    if (!fire || !fire._rawPoint) return;
+
+    const rawPt = fire._rawPoint;
+
+    // Find the matching worldPoint to use the full threat object
+    const matchedPoint = worldPoints.find(
+      (wp) =>
+        Math.abs(wp.lat - rawPt.lat) < 0.001 &&
+        Math.abs(wp.lng - rawPt.lng) < 0.001
+    );
+
+    // Use matched worldPoint if found, otherwise construct from raw data
+    const threatObj = matchedPoint || {
+      ...rawPt,
+      lat: parseFloat(rawPt.lat),
+      lng: parseFloat(rawPt.lng),
+      categoryColor: rawPt.categoryColor || '#ef4444',
+      categoryLabel: rawPt.categoryLabel || rawPt.type || 'Thermal Anomaly',
+    };
+
+    // Set as selected threat (syncs with sidebar detail panel + impact analysis)
+    setSelectedThreatPoint(threatObj);
+
+    // Trigger map fly-to
+    setFlyToTarget({ lat: threatObj.lat, lng: threatObj.lng, _ts: Date.now() });
+
+    // Smooth scroll to map section
+    if (mapSectionRef.current) {
+      mapSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [worldPoints]);
 
   const toggleExpand = (id) => {
     setExpandedId(expandedId === id ? null : id);
@@ -343,7 +417,8 @@ export default function App() {
                     coords: `${pt.lat.toFixed(3)}° N, ${pt.lng.toFixed(3)}° E`,
                     frp: `${pt.frp_mw} MW`,
                     satellite: "VIIRS / NOAA-20",
-                    detectedAt: pt.acq_date
+                    detectedAt: pt.acq_date,
+                    _rawPoint: pt,
                   }));
                   setFireList(formatted);
                 }}
@@ -557,36 +632,44 @@ export default function App() {
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            console.info(`PDF export selected for ${fire.title}`);
+                            handleLocateOnMap(fire);
                           }}
                           style={{
                             gridColumn: '1 / -1',
                             width: '100%',
                             marginTop: '4px',
-                            padding: '12px 16px',
+                            padding: '10px 16px',
                             borderRadius: '8px',
-                            border: '1px solid rgba(245, 158, 11, 0.75)',
-                            background: 'rgba(245, 158, 11, 0.10)',
+                            border: '1px solid rgba(245, 158, 11, 0.5)',
+                            background: 'rgba(245, 158, 11, 0.08)',
                             color: '#fbbf24',
-                            fontSize: '0.78rem',
+                            fontSize: '0.72rem',
                             fontWeight: 700,
                             letterSpacing: '0.12em',
                             textTransform: 'uppercase',
                             cursor: 'pointer',
                             transition: 'all 0.25s ease',
-                            boxShadow: '0 0 14px rgba(245, 158, 11, 0.10)'
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '8px',
+                            boxShadow: '0 0 10px rgba(245, 158, 11, 0.08)',
                           }}
                           onMouseEnter={(e) => {
-                            e.currentTarget.style.background = 'rgba(245, 158, 11, 0.22)';
-                            e.currentTarget.style.boxShadow = '0 0 20px rgba(245, 158, 11, 0.28)';
+                            e.currentTarget.style.background = 'rgba(245, 158, 11, 0.18)';
+                            e.currentTarget.style.boxShadow = '0 0 18px rgba(245, 158, 11, 0.22)';
+                            e.currentTarget.style.borderColor = 'rgba(245, 158, 11, 0.75)';
                           }}
                           onMouseLeave={(e) => {
-                            e.currentTarget.style.background = 'rgba(245, 158, 11, 0.10)';
-                            e.currentTarget.style.boxShadow = '0 0 14px rgba(245, 158, 11, 0.10)';
+                            e.currentTarget.style.background = 'rgba(245, 158, 11, 0.08)';
+                            e.currentTarget.style.boxShadow = '0 0 10px rgba(245, 158, 11, 0.08)';
+                            e.currentTarget.style.borderColor = 'rgba(245, 158, 11, 0.5)';
                           }}
                         >
-                          ↓ Export as PDF
+                          <MapPin size={13} strokeWidth={2.5} />
+                          View on Map
                         </button>
+
                       </div>
                     )}
                   </div>
@@ -598,12 +681,15 @@ export default function App() {
       </div>
 
       {/* Downstream Interactive Map Section */}
-      <section style={{
-        position: 'relative',
-        zIndex: 30,
-        padding: '36px 6vw 24px 6vw',
-        backgroundColor: 'transparent'
-      }}>
+      <section
+        ref={mapSectionRef}
+        style={{
+          position: 'relative',
+          zIndex: 30,
+          padding: '36px 6vw 24px 6vw',
+          backgroundColor: 'transparent',
+        }}
+      >
         <div style={{ marginBottom: '16px' }}>
           <div style={{ fontSize: '0.75rem', color: '#f59e0b', letterSpacing: '0.2em', textTransform: 'uppercase', marginBottom: '4px' }}>
             Interactive Threat Mapping
@@ -649,7 +735,16 @@ export default function App() {
                 </p>
               </div>
             ) : (
-              <LeafletMapSection points={filteredWorldPoints} onMarkerClick={setSelectedThreatPoint} />
+              <LeafletMapSection
+                points={filteredWorldPoints}
+                onMarkerClick={setSelectedThreatPoint}
+                impactActive={isImpactActive}
+                impactThreatPoint={isImpactActive ? selectedThreatPoint : null}
+                impactRadiusKm={impactRadius}
+                impactFilteredAssets={impactFilteredAssets}
+                flyToTarget={flyToTarget}
+                selectedThreatPoint={selectedThreatPoint}
+              />
             )}
           </div>
 
@@ -695,14 +790,16 @@ export default function App() {
                 boxShadow: '0 8px 25px rgba(245, 158, 11, 0.15)',
                 display: 'flex',
                 flexDirection: 'column',
-                justifyContent: 'flex-start'
+                justifyContent: 'flex-start',
+                overflowY: 'auto',
+                maxHeight: '70vh',
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                   <div style={{ fontSize: '1.05rem', fontWeight: 600, color: '#ffffff' }}>
                     {selectedThreatPoint.name || 'Selected Threat'}
                   </div>
                   <button
-                    onClick={() => setSelectedThreatPoint(null)}
+                    onClick={() => { setSelectedThreatPoint(null); setIsImpactActive(false); }}
                     style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: '1rem' }}
                   >
                     ✕
@@ -773,6 +870,15 @@ export default function App() {
                   >
                     ↓ Export as PDF
                   </button>
+
+                  {/* Impact Analysis Panel */}
+                  <ImpactAnalysisPanel
+                    selectedThreatPoint={selectedThreatPoint}
+                    isActive={isImpactActive}
+                    onToggle={handleImpactToggle}
+                    activeRadius={impactRadius}
+                    onRadiusChange={handleRadiusChange}
+                  />
                 </div>
               </div>
             ) : (
