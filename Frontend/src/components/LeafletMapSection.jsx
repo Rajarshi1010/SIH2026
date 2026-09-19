@@ -89,13 +89,14 @@ export default function LeafletMapSection({
       className: 'custom-div-icon',
       html: `<div style="
         background-color: ${color};
+        color: ${color};
         width: 18px;
         height: 18px;
         border-radius: 50%;
         border: 2.5px solid #ffffff;
         box-shadow: 0 0 16px ${color}, 0 0 30px ${color}88;
         animation: agniMarkerPulse 2s ease-in-out infinite;
-      "></div>`,
+      ">`,
       iconSize: [18, 18],
       iconAnchor: [9, 9],
       popupAnchor: [0, -10]
