@@ -180,7 +180,6 @@ SIH2026/
 │
 └── scripts/
     ├── seed_data_generator.py      # Automated generator for spatial boundaries and PostGIS seed loader
-    ├── run_and_compare.py          # Zero-command audit script comparing GeoAI against NASA FIRMS
     └── test_layer4_inference.py    # Unit test suite verifying LightGBM and TreeSHAP attribution math
 ```
 
