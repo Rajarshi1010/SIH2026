@@ -38,7 +38,7 @@ function FlyToHandler({ flyToTarget }) {
   const lastTsRef = useRef(null);
 
   useEffect(() => {
-    if (!flyToTarget || !flyToTarget.lat || !flyToTarget.lng) return;
+    if (!flyToTarget || flyToTarget.lat == null || flyToTarget.lng == null) return;
     // Deduplicate using timestamp
     if (lastTsRef.current === flyToTarget._ts) return;
     lastTsRef.current = flyToTarget._ts;
