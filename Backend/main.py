@@ -9,9 +9,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
-from fastapi import APIRouter, FastAPI, HTTPException, status
+from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import redis.asyncio as aioredis
@@ -65,10 +65,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     logger.info("System startup sequence completed.")
 
+    # 3. Start automated telemetry polling worker
+    from tasks import polling_worker
+    polling_worker.start()
+    logger.info("Automated background polling worker active.")
+
     yield
 
     # Shutdown sequence
     logger.info("Executing graceful shutdown...")
+    polling_worker.stop()
+    logger.info("Automated polling worker stopped.")
+
     if hasattr(app.state, "redis") and app.state.redis:
         await app.state.redis.aclose()
         logger.info("Redis connection pool closed.")
@@ -260,9 +268,181 @@ async def list_incidents(
                     "classification": inc.classification,
                     "classification_confidence": inc.classification_confidence,
                     "is_industrial": inc.is_industrial,
+                    "pipeline_stage": (inc.raw_metadata or {}).get("pipeline_stage"),
+                    "shap_attribution": (inc.raw_metadata or {}).get("shap_attribution"),
                 }
                 for inc in incidents
             ],
+        }
+
+
+@api_v1_router.get(
+    "/reviews",
+    summary="List Human-in-the-Loop Review Queue",
+    description="Retrieves flagged incidents requiring analyst verification (low confidence or unmapped accidents).",
+)
+async def list_reviews(
+    status_filter: str = "pending",
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """Retrieves items from the HITL review queue."""
+    from database import ReviewQueue, async_session_factory
+    from sqlalchemy import select, desc
+
+    async with async_session_factory() as session:
+        query = (
+            select(ReviewQueue)
+            .filter(ReviewQueue.status == status_filter)
+            .order_by(desc(ReviewQueue.created_at))
+            .limit(limit)
+        )
+        result = await session.execute(query)
+        reviews = result.scalars().all()
+        return {
+            "total": len(reviews),
+            "items": [
+                {
+                    "id": str(rev.id),
+                    "incident_id": str(rev.incident_id),
+                    "incident_detected_at": rev.incident_detected_at.isoformat(),
+                    "status": rev.status,
+                    "priority": rev.priority,
+                    "ai_classification": rev.ai_classification,
+                    "ai_confidence": rev.ai_confidence,
+                    "reviewer_notes": rev.reviewer_notes,
+                    "created_at": rev.created_at.isoformat(),
+                }
+                for rev in reviews
+            ],
+        }
+
+
+# ------------------------------------------------------------------------------
+# Layer 6: GIS Delivery (RFC 7946 GeoJSON) & Real-Time WebSocket Streaming
+# ------------------------------------------------------------------------------
+class ConnectionManager:
+    """Manages active WebSocket connections for real-time fire alerting."""
+
+    def __init__(self):
+        self.active_connections: Set[WebSocket] = set()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.add(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.discard(websocket)
+
+    async def broadcast(self, message: Dict[str, Any]):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_json(message)
+            except Exception:
+                self.active_connections.discard(connection)
+
+
+ws_manager = ConnectionManager()
+
+
+@api_v1_router.websocket("/ws/alerts")
+async def websocket_alerts_feed(websocket: WebSocket):
+    """Real-time streaming WebSocket endpoint for GIS clients (React / MapLibre)."""
+    await ws_manager.connect(websocket)
+    try:
+        # Send initial connection handshake
+        await websocket.send_json({
+            "event": "connected",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message": "Connected to GeoAI real-time fire telemetry stream."
+        })
+        while True:
+            # Keep socket alive and accept client pings/subscriptions
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+    except Exception:
+        ws_manager.disconnect(websocket)
+
+
+# NTRO Specification Color Palette Mapping
+COLOR_MAP = {
+    "INDUSTRIAL_FIRE_ALERT": "#E63946",         # Crimson Red (Emergency Alert)
+    "UNMAPPED_INDUSTRIAL_ACCIDENT": "#D62828",  # Deep Red (Unmapped Hazard)
+    "PERSISTENT_INDUSTRIAL_SOURCE": "#7209B7",  # Purple (Routine Industrial Facility)
+    "ROUTINE_GAS_FLARE": "#F77F00",             # Orange (Regulated Hydrocarbon Flare)
+    "AGRICULTURAL_STUBBLE_FIRE": "#FCBF49",     # Yellow (Crop Biomass Burn)
+    "WILDFIRE_FOREST_FIRE": "#2A9D8F",          # Teal/Green (Vegetation/Forest)
+    "FALSE_POSITIVE_GLINT": "#A8DADC",          # Pale Blue (Solar Reflection)
+    "unclassified": "#6C757D",                  # Neutral Gray
+}
+
+
+@api_v1_router.get(
+    "/gis/features",
+    summary="RFC 7946 Standard GeoJSON FeatureCollection",
+    description="Delivers map-ready GeoJSON features styled per NTRO color mandate for MapLibre / OpenLayers / QGIS.",
+)
+async def get_gis_feature_collection(
+    limit: int = 100,
+    is_industrial: Optional[bool] = None,
+    classification: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generates standard RFC 7946 GeoJSON FeatureCollection."""
+    from database import ThermalIncident, async_session_factory
+    from sqlalchemy import select, desc
+
+    async with async_session_factory() as session:
+        query = select(ThermalIncident).order_by(desc(ThermalIncident.detected_at)).limit(limit)
+        if is_industrial is not None:
+            query = query.filter(ThermalIncident.is_industrial == is_industrial)
+        if classification:
+            query = query.filter(ThermalIncident.classification == classification)
+
+        result = await session.execute(query)
+        incidents = result.scalars().all()
+
+        features = []
+        for inc in incidents:
+            meta = inc.raw_metadata or {}
+            color = COLOR_MAP.get(inc.classification, "#6C757D")
+
+            # Point geometry per RFC 7946 [longitude, latitude]
+            feature = {
+                "type": "Feature",
+                "id": str(inc.id),
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [inc.longitude, inc.latitude],
+                },
+                "properties": {
+                    "detected_at": inc.detected_at.isoformat(),
+                    "classification": inc.classification,
+                    "classification_confidence": inc.classification_confidence,
+                    "is_industrial": inc.is_industrial,
+                    "frp_mw": inc.frp,
+                    "brightness_k": inc.brightness,
+                    "satellite": inc.satellite,
+                    "h3_index": inc.h3_index,
+                    "marker_color": color,
+                    "emitter_id": str(inc.emitter_id) if inc.emitter_id else None,
+                    "distance_to_emitter_meters": inc.distance_to_emitter_meters,
+                    "shap_attribution": meta.get("shap_attribution"),
+                    "verification": meta.get("layer_5_verification"),
+                    "footprint_polygon": meta.get("footprint_geojson"),
+                },
+            }
+            features.append(feature)
+
+        return {
+            "type": "FeatureCollection",
+            "name": "GeoAI_Thermal_Anomalies",
+            "crs": {
+                "type": "name",
+                "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"},
+            },
+            "features": features,
         }
 
 

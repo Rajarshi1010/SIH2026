@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     # Default covers India: 68.0, 6.0, 97.0, 36.0
     OPERATIONAL_BBOX: str = "68,6,97,36"
 
+    # --- Layer 5: STAC API & Optical Verification (Sentinel-2) ---
+    STAC_API_URL: str = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
+    STAC_COLLECTION: str = "sentinel-2-l2a"
+    DELTA_NBR_BURN_THRESHOLD: float = 0.27
+
     # --- Geospatial Parameters ---
     H3_RESOLUTION: int = Field(default=8, ge=0, le=15)
     SPATIAL_SEARCH_RADIUS_KM: float = Field(default=5.0, gt=0.0)
