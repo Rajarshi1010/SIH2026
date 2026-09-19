@@ -51,3 +51,6 @@ data/raw/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+
+scripts/run_and_compare.py
