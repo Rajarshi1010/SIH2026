@@ -18,7 +18,9 @@
         background-color: #020204;
         color: #ffffff;
         font-family: system-ui, -apple-system, sans-serif;
-        overflow-x: hidden;
+        /* `clip`, not `hidden`: `hidden` makes body a scroll container and the
+           sticky hero stops pinning */
+        overflow-x: clip;
         -ms-overflow-style: none;  /* IE / Edge */
         scrollbar-width: none;  /* Firefox */
       }

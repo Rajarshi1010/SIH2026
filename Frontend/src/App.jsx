@@ -2,70 +2,78 @@ import React, { useRef, useState, useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
 import InteractiveWorldGroup from "./components/InteractiveWorldGroup";
 import LeafletMapSection from "./components/LeafletMapSection";
-import { fetchWorldPoints } from "./api";
+import { fetchGisFeatures } from "./api";
+import { CLASSIFICATIONS, CLASSIFICATION_KEYS } from "./classifications";
+import ThreatAnalysisPanel from "./components/ThreatAnalysisPanel";
+import NearestAnomalies from "./components/NearestAnomalies";
 
+
+// Below this width the hero stacks and the scroll hijack is switched off.
+const MOBILE_BREAKPOINT = 860;
+
+function useIsMobile() {
+  const query = `(max-width: ${MOBILE_BREAKPOINT}px)`;
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(query).matches
+  );
+
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = (e) => setIsMobile(e.matches);
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, [query]);
+
+  return isMobile;
+}
+
+const HERO_STATS = [
+  { value: '5-day', label: 'window' },
+  { value: 'VIIRS', label: 'sensor' },
+  { value: '45 min', label: 'refresh' },
+];
 
 export default function App() {
   const scrollProgressRef = useRef(0);
   const targetProgressRef = useRef(0); // Holds the target scroll destination
   const animFrameIdRef = useRef(null);
+  const pendingMapScrollRef = useRef(false);
 
+  const isMobile = useIsMobile();
   const [heroProgress, setHeroProgress] = useState(0);
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
-  const [backendStatus, setBackendStatus] = useState("idle");
+  const [, setBackendStatus] = useState("idle");
   const [fireList, setFireList] = useState([]);
   const [worldPoints, setWorldPoints] = useState([]);
   const [osmBackendStatus, setOsmBackendStatus] = useState("loading");
   const [selectedThreatPoint, setSelectedThreatPoint] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [activeCategories, setActiveCategories] = useState(() => CLASSIFICATION_KEYS);
+  const [detailPoint, setDetailPoint] = useState(null);
+  const [utcClock, setUtcClock] = useState(() => new Date().toISOString().slice(11, 19));
+  const mapSectionRef = useRef(null);
+  const [notifiedIds, setNotifiedIds] = useState([]);
 
-  const toggleExpand = (id) => {
-    setExpandedId(expandedId === id ? null : id);
+  useEffect(() => {
+    const tick = setInterval(() => setUtcClock(new Date().toISOString().slice(11, 19)), 1000);
+    return () => clearInterval(tick);
+  }, []);
+
+  const toggleCategory = (label) => {
+    setActiveCategories((prev) =>
+      prev.includes(label) ? prev.filter((l) => l !== label) : [...prev, label]
+    );
   };
 
   useEffect(() => {
-    fetchWorldPoints()
-      .then((data) => {
-        if (!data) throw new Error("Failed to fetch world points");
-
-        let allPoints = [];
-        if (Array.isArray(data)) {
-          allPoints = data.map((pt) => ({
-            ...pt,
-            lat: parseFloat(pt.lat || pt.latitude || 0),
-            lng: parseFloat(pt.lng || pt.longitude || 0),
-            categoryColor: pt.categoryColor || '#ef4444',
-            categoryLabel: pt.categoryLabel || 'Thermal Anomaly'
-          }));
-        } else {
-          const categories = [
-            { key: 'green', color: '#22c55e', label: 'Forest Fire / Wildfire' },
-            { key: 'yellow', color: '#eab308', label: 'Refineries / Gas Flares' },
-            { key: 'red', color: '#ef4444', label: 'Industrial Facilities' },
-            { key: 'orange', color: '#f97316', label: 'Other / Unclassified Active Threats' },
-          ];
-
-          categories.forEach((cat) => {
-            if (data[cat.key] && Array.isArray(data[cat.key])) {
-              data[cat.key].forEach((pt) => {
-                allPoints.push({
-                  ...pt,
-                  lat: parseFloat(pt.lat || pt.latitude || 0),
-                  lng: parseFloat(pt.lng || pt.longitude || 0),
-                  categoryColor: cat.color,
-                  categoryLabel: cat.label
-                });
-              });
-            }
-          });
-        }
-
-        setWorldPoints(allPoints);
+    fetchGisFeatures({ limit: 500 })
+      .then((features) => {
+        setWorldPoints(features);
         setOsmBackendStatus("success");
       })
       .catch((err) => {
-        console.error("Error fetching /world-points/:", err);
+        console.error("Error fetching /gis/features:", err);
         setOsmBackendStatus("error");
       });
   }, []);
@@ -99,8 +107,13 @@ export default function App() {
     return () => cancelAnimationFrame(animFrameIdRef.current);
   }, []);
 
-  // Wheel & Key Event Handlers updating Target Progress
+  // Wheel & Key Event Handlers updating Target Progress.
+  // Not registered on mobile: there is no wheel event on touch, so hijacking
+  // scroll there would leave the page locked with no way to advance. Mobile
+  // scrolls natively and drives the roll from the CTA instead.
   useEffect(() => {
+    if (isMobile) return undefined;
+
     const handleWheel = (e) => {
       const atTop = window.scrollY <= 5;
       const currentTarget = targetProgressRef.current;
@@ -138,66 +151,188 @@ export default function App() {
       window.removeEventListener("wheel", handleWheel);
       window.removeEventListener("keydown", handleKeydown);
     };
-  }, []);
+  }, [isMobile]);
 
   useEffect(() => {
-    document.body.style.overflow = isUnlocked ? "auto" : "hidden";
+    // Lock on <html>, not <body>: <body> overflow never stops the viewport from
+    // scrolling, it only turns <body> into a scroll container — which silently
+    // kills the sticky hero's pinning and clips the globe on scroll.
+    document.documentElement.style.overflow = isUnlocked || isMobile ? "" : "hidden";
     document.body.style.scrollbarGutter = "stable";
     return () => {
-      document.body.style.overflow = "auto";
+      document.documentElement.style.overflow = "";
     };
+  }, [isUnlocked, isMobile]);
+
+  useEffect(() => {
+    if (!isUnlocked || !pendingMapScrollRef.current) return;
+    pendingMapScrollRef.current = false;
+    mapSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [isUnlocked]);
 
   // Interpolated opacity values based on smooth heroProgress
   const landingOpacity = Math.max(0, 1 - heroProgress * 1.3);
   const overlayOpacity = Math.min(1, Math.max(0, (heroProgress - 0.3) / 0.7));
 
+  // "Open live dashboard" -> the threat map below. On desktop the page is still
+  // scroll-locked until the roll finishes, so the scroll is queued and fired by
+  // the effect below once the lock lifts. Mobile is never locked, so it goes now.
   const handleScanClick = () => {
+    if (isMobile) {
+      mapSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    pendingMapScrollRef.current = true;
+    targetProgressRef.current = 1;
+  };
+
+  // "Find threats near me" -> the nearest-anomalies panel. Rolling to 1 fades the
+  // landing copy out, slides the globe left and brings the panel up in its place,
+  // so the destination is already on screen — no scroll.
+  const handleFindNearby = () => {
+    pendingMapScrollRef.current = false;
     targetProgressRef.current = 1;
   };
 
   const filteredWorldPoints = worldPoints.filter((pt) => {
+    if (!activeCategories.includes(pt.classification)) return false;
     if (!searchQuery) return true;
-    const nameMatch = pt.name ? pt.name.toLowerCase().includes(searchQuery.toLowerCase()) : false;
-    const catMatch = pt.categoryLabel ? pt.categoryLabel.toLowerCase().includes(searchQuery.toLowerCase()) : false;
-    return nameMatch || catMatch;
+    const q = searchQuery.toLowerCase();
+    return (
+      (pt.classificationLabel || '').toLowerCase().includes(q) ||
+      (pt.satellite || '').toLowerCase().includes(q) ||
+      (pt.h3_index || '').toLowerCase().includes(q) ||
+      (pt.emitter_id || '').toLowerCase().includes(q)
+    );
   });
 
   return (
     <div style={{
-      color: '#ffffff',
+      color: '#E8EDF5',
       position: 'relative',
-      overflowX: 'hidden',
+      overflowX: 'clip',
       backgroundColor: '#030205',
       backgroundImage: `
         repeating-linear-gradient(-35deg, rgba(255, 255, 255, 0.012) 0px, rgba(255, 255, 255, 0.012) 1px, transparent 1px, transparent 90px),
-        radial-gradient(ellipse at 78% 28%, rgba(150, 18, 18, 0.12) 0%, transparent 45%),
-        radial-gradient(ellipse at 22% 72%, rgba(110, 12, 22, 0.09) 0%, transparent 40%),
-        radial-gradient(circle at 50% 50%, rgba(80, 8, 14, 0.14) 0%, transparent 70%)
+        radial-gradient(ellipse at 78% 28%, rgba(150, 18, 18, 0.08) 0%, transparent 45%),
+        radial-gradient(ellipse at 22% 72%, rgba(110, 12, 22, 0.06) 0%, transparent 40%),
+        radial-gradient(circle at 50% 50%, rgba(80, 8, 14, 0.08) 0%, transparent 70%)
       `,
       backgroundAttachment: 'fixed'
     }}>
 
-      {/* Sticky Hero Viewport Container */}
+      {/* Hero Viewport Container — deliberately not sticky: scroll is locked
+          until the globe finishes rolling, so there is nothing to pin against,
+          and pinning afterwards just leaves the hero showing under the
+          sections that scroll over it. */}
       <div style={{
-        position: 'sticky',
-        top: 0,
-        height: '100vh',
-        width: '100vw',
-        overflow: 'hidden',
+        position: 'relative',
+        // On mobile the hero grows past 100vh rather than clipping: a short
+        // viewport would otherwise squeeze the globe to a sliver, and there is
+        // no scroll lock on mobile so the page can simply be longer.
+        height: isMobile ? 'auto' : '100vh',
+        minHeight: isMobile ? '100vh' : undefined,
+        width: '100%',
+        overflow: isMobile ? 'visible' : 'hidden',
         display: 'flex',
+        flexDirection: isMobile ? 'column' : 'row',
         alignItems: 'center',
-        justifyContent: 'center',
-        background: 'radial-gradient(circle at 65% 50%, rgba(185, 28, 28, 0.12) 0%, rgba(154, 26, 26, 0.04) 40%, rgba(3, 2, 5, 0.85) 80%)'
+        justifyContent: isMobile ? 'flex-start' : 'center',
+        background: 'radial-gradient(circle at 58% 50%, rgba(185, 28, 28, 0.09) 0%, rgba(154, 26, 26, 0.03) 40%, rgba(3, 2, 5, 0.85) 80%)'
       }}>
 
-        {/* Title & Primary Copy Overlay */}
+        {/* Top status bar */}
         <div style={{
           position: 'absolute',
-          left: '6vw',
-          top: '50%',
-          transform: 'translateY(-50%)',
-          maxWidth: '580px',
+          top: 0,
+          left: 0,
+          right: 0,
+          zIndex: 30,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: '12px',
+          padding: isMobile ? '14px 1.25rem' : '16px 2rem',
+          borderBottom: '1px solid #2C3648',
+          opacity: landingOpacity,
+          pointerEvents: landingOpacity < 0.05 ? 'none' : 'auto',
+          transition: 'opacity 0.2s ease-out',
+          userSelect: 'none'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <span style={{
+              width: '30px',
+              height: '30px',
+              borderRadius: '50%',
+              border: '1.5px solid #F59E0B',
+              display: 'grid',
+              placeItems: 'center',
+              flexShrink: 0
+            }}>
+              <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#F59E0B' }} />
+            </span>
+
+            <div>
+              <div style={{
+                fontFamily: "'Baumans', cursive",
+                fontSize: '1.15rem',
+                letterSpacing: '0.09em',
+                lineHeight: 1,
+                color: '#E8EDF5',
+                textTransform: 'uppercase'
+              }}>
+                AGNIKAVACH
+              </div>
+              <div style={{
+                display: isMobile ? 'none' : 'block',
+                fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                fontSize: '0.68rem',
+                letterSpacing: '0.11em',
+                color: '#7E91B1',
+                marginTop: '5px'
+              }}>
+                thermal anomaly intelligence
+              </div>
+            </div>
+          </div>
+
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '16px',
+            fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+            fontSize: '0.72rem',
+            letterSpacing: '0.09em'
+          }}>
+            <span style={{ color: '#E8EDF5' }}>
+              {utcClock} <span style={{ color: '#7E91B1' }}>UTC</span>
+            </span>
+
+            <span style={{
+              display: isMobile ? 'none' : 'inline',
+              borderLeft: '1px solid #2C3648',
+              paddingLeft: '12px',
+              color: '#7E91B1'
+            }}>
+              NASA FIRMS
+            </span>
+          </div>
+        </div>
+
+        {/* Hero copy — left column on desktop, top half of the stack on mobile */}
+        <div style={{
+          position: isMobile ? 'relative' : 'absolute',
+          left: isMobile ? 'auto' : 0,
+          top: isMobile ? 'auto' : 0,
+          flex: isMobile ? '0 0 auto' : undefined,
+          height: isMobile ? 'auto' : '100%',
+          width: isMobile ? '100%' : '45%',
+          minWidth: isMobile ? 0 : '340px',
+          display: isMobile && landingOpacity < 0.05 ? 'none' : 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+          padding: isMobile ? '88px 1.25rem 4px' : '0 2rem 0 4vw',
           zIndex: 10,
           opacity: landingOpacity,
           pointerEvents: landingOpacity < 0.05 ? 'none' : 'auto',
@@ -205,95 +340,157 @@ export default function App() {
           userSelect: 'none'
         }}>
           <div style={{
-            fontFamily: "'Inter', sans-serif",
+            fontFamily: "'JetBrains Mono', ui-monospace, monospace",
             fontSize: '0.75rem',
-            fontWeight: 700,
-            letterSpacing: '0.3em',
+            fontWeight: 500,
+            letterSpacing: '0.2em',
             textTransform: 'uppercase',
-            color: '#f97316',
-            marginBottom: '16px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '10px'
+            color: '#F59E0B',
+            marginBottom: isMobile ? '14px' : '22px'
           }}>
-            <span style={{ width: '24px', height: '2px', background: '#f97316' }} />
-            Orbital Threat Defense System
+            Satellite Thermal Intelligence
           </div>
 
           <h1 style={{
             fontFamily: "'Baumans', cursive",
-            fontSize: 'clamp(3rem, 6vw, 5.5rem)',
-            fontWeight: 700,
+            fontSize: 'clamp(2.6rem, 5.2vw, 4.6rem)',
+            fontWeight: 400,
             lineHeight: 1,
-            color: '#ffffff',
-            margin: '0 0 20px 0',
-            letterSpacing: '0.05em',
-            textTransform: 'uppercase'
+            letterSpacing: '0.04em',
+            textTransform: 'uppercase',
+            color: '#E8EDF5',
+            margin: isMobile ? '0 0 12px 0' : '0 0 18px 0'
           }}>
             AGNIKAVACH
           </h1>
 
           <p style={{
-            fontFamily: "'Inter', sans-serif",
-            fontSize: 'clamp(0.95rem, 1.1vw, 1.1rem)',
-            lineHeight: 1.6,
-            color: 'rgba(255, 255, 255, 0.72)',
-            margin: '0 0 32px 0',
-            maxWidth: '500px'
+            fontFamily: "'Noto Sans', sans-serif",
+            fontSize: 'clamp(1.15rem, 1.6vw, 1.5rem)',
+            fontWeight: 300,
+            lineHeight: 1.3,
+            letterSpacing: '-0.012em',
+            color: '#E8EDF5',
+            margin: '0 0 18px 0'
           }}>
-            Harnessing real-time satellite thermal telemetry to pinpoint wildfires, industrial flares, and critical heat anomalies across the planet before they ignite disaster.
+            A shield that never blinks.
+            <br />
+            <span style={{ opacity: 0.3 }}>Thermal watch over every square kilometre.</span>
           </p>
 
-          <div style={{ display: 'flex', alignItems: 'center' }}>
+          <p style={{
+            fontFamily: "'Noto Sans', sans-serif",
+            fontSize: 'clamp(1rem, 1.1vw, 1.1rem)',
+            lineHeight: 1.65,
+            color: '#AAB7CC',
+            margin: isMobile ? '0 0 20px 0' : '0 0 32px 0',
+            maxWidth: '500px'
+          }}>
+            Live NASA FIRMS detections fused with months of historical persistence, sorted
+            into eight threat classes, from routine gas flares to unmapped industrial
+            accidents.
+          </p>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
             <button
               onClick={handleScanClick}
               style={{
-                background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(239, 68, 68, 0.2))',
-                border: '1px solid rgba(245, 158, 11, 0.8)',
+                background: '#F59E0B',
+                border: '1px solid #F59E0B',
                 borderRadius: '8px',
-                color: '#ffffff',
-                padding: '14px 32px',
-                fontSize: '0.75rem',
+                color: '#150E02',
+                padding: '13px 26px',
+                fontSize: '0.88rem',
                 fontWeight: 700,
-                letterSpacing: '0.2em',
-                textTransform: 'uppercase',
                 cursor: 'pointer',
-                transition: 'all 0.3s ease',
-                backdropFilter: 'blur(8px)',
-                boxShadow: '0 0 20px rgba(245, 158, 11, 0.25)'
+                transition: 'background 0.2s ease, border-color 0.2s ease'
               }}
               onMouseEnter={(e) => {
-                e.currentTarget.style.background = '#f59e0b';
-                e.currentTarget.style.color = '#000000';
-                e.currentTarget.style.borderColor = '#f59e0b';
-                e.currentTarget.style.boxShadow = '0 0 30px rgba(245, 158, 11, 0.6)';
+                e.currentTarget.style.background = '#FFB224';
+                e.currentTarget.style.borderColor = '#FFB224';
               }}
               onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(239, 68, 68, 0.2))';
-                e.currentTarget.style.color = '#ffffff';
-                e.currentTarget.style.borderColor = 'rgba(245, 158, 11, 0.8)';
-                e.currentTarget.style.boxShadow = '0 0 20px rgba(245, 158, 11, 0.25)';
+                e.currentTarget.style.background = '#F59E0B';
+                e.currentTarget.style.borderColor = '#F59E0B';
               }}
             >
-              Initiate Thermal Scan
+              Open live dashboard
+            </button>
+
+            <button
+              onClick={handleFindNearby}
+              style={{
+                background: '#182236',
+                border: '1px solid #3D4A63',
+                borderRadius: '8px',
+                color: '#AAB7CC',
+                padding: '13px 26px',
+                fontSize: '0.88rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+                transition: 'background 0.2s ease, color 0.2s ease'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = '#24304A';
+                e.currentTarget.style.color = '#E8EDF5';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = '#182236';
+                e.currentTarget.style.color = '#AAB7CC';
+              }}
+            >
+              Find threats near me
             </button>
           </div>
-        </div>
 
+          <div style={{ display: 'flex', alignItems: 'center', marginTop: isMobile ? '20px' : '30px' }}>
+            {HERO_STATS.map((stat, i) => (
+              <div
+                key={stat.label}
+                style={{
+                  padding: i === 0 ? '0 20px 0 0' : '0 20px',
+                  borderLeft: i === 0 ? 'none' : '0.5px solid rgba(255, 255, 255, 0.09)'
+                }}
+              >
+                <div style={{
+                  fontFamily: "'Inter', sans-serif",
+                  fontSize: '17px',
+                  fontWeight: 600,
+                  lineHeight: 1.2,
+                  color: '#AAB7CC'
+                }}>
+                  {stat.value}
+                </div>
+                <div style={{
+                  fontFamily: "'Inter', sans-serif",
+                  fontSize: '9px',
+                  fontWeight: 500,
+                  letterSpacing: '0.14em',
+                  textTransform: 'uppercase',
+                  marginTop: '5px',
+                  color: '#AAB7CC',
+                  opacity: 0.4
+                }}>
+                  {stat.label}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
         {/* Telemetry Footer */}
         <div style={{
           position: 'absolute',
           right: '3vw',
           bottom: '4vh',
           zIndex: 10,
-          display: 'flex',
+          display: isMobile ? 'none' : 'flex',
           flexDirection: 'column',
           alignItems: 'flex-end',
           gap: '4px',
-          fontFamily: "'Courier New', monospace",
-          fontSize: '0.7rem',
+          fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+          fontSize: '0.75rem',
           letterSpacing: '0.1em',
-          color: 'rgba(255, 255, 255, 0.45)',
+          color: '#7E91B1',
           opacity: landingOpacity,
           pointerEvents: 'none',
           transition: 'opacity 0.2s ease-out'
@@ -302,19 +499,27 @@ export default function App() {
           <div>BANDS: I4 (3.74 μm) • I5 (11.45 μm)</div>
         </div>
 
-        {/* 3D Canvas Layer */}
+        {/* 3D Canvas Layer — full width so the globe never clips against the
+            canvas edge as it travels left. Widening it costs nothing visually:
+            the globe's on-screen size is set by the vertical FOV and the canvas
+            height, so only the horizontal room changes. */}
         <div style={{
-          position: 'absolute',
-          inset: 0,
+          position: isMobile ? 'relative' : 'absolute',
+          left: isMobile ? 'auto' : 0,
+          right: isMobile ? 'auto' : 0,
+          top: isMobile ? 'auto' : 0,
+          flex: isMobile ? '1 1 auto' : undefined,
+          minHeight: isMobile ? '280px' : undefined,
+          height: isMobile ? 'auto' : '100%',
+          width: '100%',
           zIndex: 0,
           pointerEvents: 'none',
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'center',
-          transform: 'translateX(4vw)'
+          justifyContent: 'center'
         }}>
           <Canvas
-            camera={{ position: [0, 0, 14], fov: 45 }}
+            camera={{ position: [0, 0, 9.2], fov: 45 }}
             shadows={false}
             gl={{ alpha: true, antialias: true }}
             style={{ pointerEvents: 'auto', width: '100%', height: '100%' }}
@@ -328,520 +533,285 @@ export default function App() {
 
             <React.Suspense fallback={null}>
               <InteractiveWorldGroup
+                isMobile={isMobile}
                 scrollProgressRef={scrollProgressRef}
                 onProgressChange={setHeroProgress}
                 onBackendStatusChange={setBackendStatus}
                 selectedPointId={expandedId}
                 onSelectPoint={(id) => setExpandedId(id)}
-                onFiresFetched={(points) => {
-                  const formatted = points.slice(0, 5).map((pt, index) => ({
-                    id: pt.id || index + 1,
-                    title: pt.name || `Thermal Anomaly #${index + 1}`,
-                    distance: `${pt.distance_km.toFixed(1)} km away`,
-                    confidence: `${(pt.score * 100).toFixed(0)}%`,
-                    severity: pt.frp_mw > 100 ? "High" : pt.frp_mw > 40 ? "Moderate" : "Low",
-                    coords: `${pt.lat.toFixed(3)}° N, ${pt.lng.toFixed(3)}° E`,
-                    frp: `${pt.frp_mw} MW`,
-                    satellite: "VIIRS / NOAA-20",
-                    detectedAt: pt.acq_date
-                  }));
-                  setFireList(formatted);
-                }}
+                onFiresFetched={(points) => setFireList(points.slice(0, 5))}
               />
             </React.Suspense>
           </Canvas>
         </div>
 
-        {/* Anomaly Cards Layer */}
+        {/* Nearest anomalies — centred in the right half the globe vacates */}
         <div style={{
           position: 'absolute',
-          inset: 0,
+          left: isMobile ? 0 : '50%',
+          right: 0,
+          top: isMobile ? '69px' : 0,
+          bottom: isMobile ? 0 : 'auto',
+          height: isMobile ? 'auto' : '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: isMobile ? '12px 1.25rem' : '0 2rem',
           zIndex: 20,
-          pointerEvents: heroProgress > 0.8 ? 'auto' : 'none',
           opacity: overlayOpacity,
+          pointerEvents: 'none',
           transition: 'opacity 0.2s ease-out'
         }}>
           <div style={{
-            position: 'absolute',
-            top: '12%',
-            left: '6vw',
-            width: '36vw',
-            maxWidth: '460px',
-            textAlign: 'center'
+            width: '100%',
+            maxWidth: '440px',
+            maxHeight: '100%',
+            overflowY: isMobile ? 'auto' : 'visible',
+            pointerEvents: heroProgress > 0.8 ? 'auto' : 'none'
           }}>
-            <h2 style={{
-              margin: 0,
-              fontFamily: "'Baumans', cursive",
-              fontSize: 'clamp(1.1rem, 2vw, 1.9rem)',
-              color: '#f97316',
-              letterSpacing: '0.06em',
-              textTransform: 'uppercase',
-              display: 'flex',
-              alignItems: 'baseline',
-              justifyContent: 'center',
-              gap: '10px',
-              flexWrap: 'nowrap'
-            }}>
-              <span>Nearest Active Anomalies</span>
-              <span style={{
-                fontFamily: "'Inter', sans-serif",
-                fontSize: '0.65em',
-                fontWeight: 600,
-                color: 'rgba(255, 255, 255, 0.85)',
-                letterSpacing: '0.03em',
-                textTransform: 'none'
-              }}>
-                (Top 5)
-              </span>
-            </h2>
-
-            <div style={{
-              height: '2px',
-              width: '70%',
-              margin: '12px auto 0 auto',
-              background: 'linear-gradient(90deg, transparent, #f97316, transparent)'
-            }} />
-          </div>
-
-          <div style={{
-            position: 'absolute',
-            right: '10vw',
-            top: '50%',
-            transform: 'translateY(-50%)',
-            width: 'min(420px, 42vw)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '12px',
-            maxHeight: '82vh',
-            overflowY: 'auto',
-            paddingRight: '6px'
-          }}>
-            {backendStatus === "location_error" ? (
-              <div style={{
-                background: 'rgba(239, 68, 68, 0.15)',
-                backdropFilter: 'blur(16px)',
-                border: '1px solid rgba(239, 68, 68, 0.4)',
-                borderRadius: '14px',
-                padding: '24px',
-                textAlign: 'center',
-                color: '#ef4444',
-                fontFamily: "'Inter', sans-serif"
-              }}>
-                <h3 style={{ margin: '0 0 8px 0', fontSize: '1.1rem', fontWeight: 650 }}>Location Disabled</h3>
-                <p style={{ margin: 0, fontSize: '0.85rem', color: 'rgba(255, 255, 255, 0.7)' }}>
-                  Enable location access to calculate proximity vectors for nearby thermal anomalies.
-                </p>
-              </div>
-            ) : backendStatus === "error" ? (
-              <div style={{
-                background: 'rgba(239, 68, 68, 0.15)',
-                backdropFilter: 'blur(16px)',
-                border: '1px solid rgba(239, 68, 68, 0.4)',
-                borderRadius: '14px',
-                padding: '24px',
-                textAlign: 'center',
-                color: '#ef4444',
-                fontFamily: "'Inter', sans-serif"
-              }}>
-                <h3 style={{ margin: '0 0 8px 0', fontSize: '1.1rem', fontWeight: 650 }}>Satellite Feed Offline</h3>
-                <p style={{ margin: 0, fontSize: '0.85rem', color: 'rgba(255, 255, 255, 0.7)' }}>
-                  Unable to contact thermal API backend. Please verify your network telemetry.
-                </p>
-              </div>
-            ) : backendStatus === "loading" ? (
-              <div style={{
-                background: 'rgba(15, 23, 30, 0.5)',
-                backdropFilter: 'blur(16px)',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
-                borderRadius: '14px',
-                padding: '24px',
-                textAlign: 'center',
-                color: '#f59e0b',
-                fontFamily: "'Inter', sans-serif"
-              }}>
-                <p style={{ margin: 0, fontSize: '0.9rem' }}>Acquiring satellite thermal passes...</p>
-              </div>
-            ) : (
-              fireList.map((fire) => {
-                const isExpanded = expandedId === fire.id;
-
-                return (
-                  <div
-                    key={fire.id}
-                    onClick={() => toggleExpand(fire.id)}
-                    style={{
-                      background: isExpanded
-                        ? 'rgba(20, 30, 42, 0.85)'
-                        : 'rgba(15, 23, 30, 0.6)',
-                      backdropFilter: 'blur(16px) saturate(180%)',
-                      WebkitBackdropFilter: 'blur(16px) saturate(180%)',
-                      border: isExpanded
-                        ? '1px solid rgba(245, 158, 11, 0.6)'
-                        : '1px solid rgba(255, 255, 255, 0.12)',
-                      borderRadius: '14px',
-                      padding: '16px 20px',
-                      cursor: 'pointer',
-                      transition: 'all 0.35s cubic-bezier(0.16, 1, 0.3, 1)',
-                      boxShadow: isExpanded
-                        ? '0 10px 30px rgba(245, 158, 11, 0.2), 0 0 15px rgba(0, 0, 0, 0.5)'
-                        : '0 4px 20px rgba(0, 0, 0, 0.3)',
-                      userSelect: 'none'
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 600, color: '#ffffff', letterSpacing: '0.02em' }}>
-                          {fire.title}
-                        </div>
-                        <div style={{ fontSize: '0.78rem', color: 'rgba(255, 255, 255, 0.6)', marginTop: '4px' }}>
-                          {fire.distance} • Conf: <span style={{ color: '#f59e0b' }}>{fire.confidence}</span>
-                        </div>
-                      </div>
-
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <span style={{
-                          fontSize: '0.68rem',
-                          fontWeight: 700,
-                          textTransform: 'uppercase',
-                          letterSpacing: '0.08em',
-                          padding: '3px 8px',
-                          borderRadius: '20px',
-                          background: fire.severity === 'High'
-                            ? 'rgba(239, 68, 68, 0.25)'
-                            : 'rgba(245, 158, 11, 0.25)',
-                          color: fire.severity === 'High' ? '#ef4444' : '#f59e0b',
-                          border: `1px solid ${fire.severity === 'High' ? 'rgba(239, 68, 68, 0.4)' : 'rgba(245, 158, 11, 0.4)'}`
-                        }}>
-                          {fire.severity}
-                        </span>
-
-                        <span style={{
-                          color: 'rgba(255, 255, 255, 0.7)',
-                          fontSize: '1.1rem',
-                          transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
-                          transition: 'transform 0.3s ease'
-                        }}>
-                          ▾
-                        </span>
-                      </div>
-                    </div>
-
-                    {isExpanded && (
-                      <div style={{
-                        marginTop: '14px',
-                        paddingTop: '12px',
-                        borderTop: '1px solid rgba(255, 255, 255, 0.1)',
-                        display: 'grid',
-                        gridTemplateColumns: '1fr 1fr',
-                        gap: '12px',
-                        fontSize: '0.78rem',
-                        color: 'rgba(255, 255, 255, 0.8)'
-                      }}>
-                        <div>
-                          <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block' }}>GPS Coordinates</span>
-                          <strong style={{ fontFamily: "'Courier New', monospace" }}>{fire.coords}</strong>
-                        </div>
-                        <div>
-                          <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block' }}>Radiative Power</span>
-                          <strong style={{ color: '#f59e0b' }}>{fire.frp}</strong>
-                        </div>
-                        <div>
-                          <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block' }}>Satellite Source</span>
-                          <strong>{fire.satellite}</strong>
-                        </div>
-                        <div>
-                          <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block' }}>First Detected</span>
-                          <strong>{fire.detectedAt}</strong>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            console.info(`PDF export selected for ${fire.title}`);
-                          }}
-                          style={{
-                            gridColumn: '1 / -1',
-                            width: '100%',
-                            marginTop: '4px',
-                            padding: '12px 16px',
-                            borderRadius: '8px',
-                            border: '1px solid rgba(245, 158, 11, 0.75)',
-                            background: 'rgba(245, 158, 11, 0.10)',
-                            color: '#fbbf24',
-                            fontSize: '0.78rem',
-                            fontWeight: 700,
-                            letterSpacing: '0.12em',
-                            textTransform: 'uppercase',
-                            cursor: 'pointer',
-                            transition: 'all 0.25s ease',
-                            boxShadow: '0 0 14px rgba(245, 158, 11, 0.10)'
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.background = 'rgba(245, 158, 11, 0.22)';
-                            e.currentTarget.style.boxShadow = '0 0 20px rgba(245, 158, 11, 0.28)';
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.background = 'rgba(245, 158, 11, 0.10)';
-                            e.currentTarget.style.boxShadow = '0 0 14px rgba(245, 158, 11, 0.10)';
-                          }}
-                        >
-                          ↓ Export as PDF
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            )}
+            <NearestAnomalies points={fireList} />
           </div>
         </div>
+
       </div>
 
       {/* Downstream Interactive Map Section */}
-      <section style={{
-        position: 'relative',
-        zIndex: 30,
-        padding: '36px 6vw 24px 6vw',
-        backgroundColor: 'transparent'
-      }}>
-        <div style={{ marginBottom: '16px' }}>
-          <div style={{ fontSize: '0.75rem', color: '#f59e0b', letterSpacing: '0.2em', textTransform: 'uppercase', marginBottom: '4px' }}>
-            Interactive Threat Mapping
+      <section ref={mapSectionRef} className="relative z-30 bg-transparent px-5 py-9 md:px-8">
+        <div className="mb-5">
+          <div>
+            <div className="flex items-center gap-2.5 font-sans text-[13px] font-bold uppercase tracking-[0.2em] text-accent">
+              <span className="pulse-dot h-1.5 w-1.5 rounded-full bg-accent text-accent" />
+              Interactive Threat Mapping
+            </div>
+            <h2 className="mt-2 font-display text-[24px] font-extrabold uppercase tracking-wide text-text-primary">
+              Global Heat Spot Grid
+            </h2>
           </div>
-          <h2 style={{
-            fontSize: 'clamp(1.5rem, 2.5vw, 2.2rem)',
-            fontWeight: 'bold',
-            fontFamily: "'Baumans', cursive",
-            color: '#ffffff',
-            margin: 0
-          }}>
-            Global Thermal Anomaly Grid
-          </h2>
+
         </div>
 
-        <div style={{ display: 'flex', gap: '24px', alignItems: 'stretch', flexWrap: 'wrap' }}>
-          <div style={{
-            flex: '1 1 68%',
-            minHeight: '520px',
-            borderRadius: '16px',
-            overflow: 'hidden',
-            border: '1px solid rgba(255, 255, 255, 0.12)',
-            boxShadow: '0 10px 30px rgba(0,0,0,0.5)'
-          }}>
+        {/* Category filter pills */}
+        <div className="mb-4 flex flex-wrap gap-2">
+          {CLASSIFICATION_KEYS.map((key) => {
+            const meta = CLASSIFICATIONS[key];
+            const isActive = activeCategories.includes(key);
+            const count = worldPoints.filter((p) => p.classification === key).length;
+
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => toggleCategory(key)}
+                title={meta.meaning}
+                className="cat-pill flex items-center gap-2 rounded-full border px-3 py-1.5 font-sans text-[14px] font-medium"
+                style={{
+                  borderColor: isActive ? meta.color : "var(--color-border-soft)",
+                  backgroundColor: isActive ? "var(--color-raised)" : "var(--color-card)",
+                  color: isActive ? "var(--color-text-primary)" : "var(--color-text-muted)",
+                }}
+              >
+                <span
+                  className="h-2 w-2 rounded-full"
+                  style={{ backgroundColor: isActive ? meta.color : "var(--color-text-muted)" }}
+                />
+                {meta.short}
+                <span className="font-mono tabular-nums opacity-60">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex flex-col gap-4 lg:flex-row">
+          {/* Map */}
+          <div className="h-[380px] min-w-0 flex-1 overflow-hidden rounded-lg border border-border-strong bg-surface sm:h-[520px] lg:h-[560px]">
             {osmBackendStatus === "error" ? (
-              <div style={{
-                width: '100%',
-                height: '100%',
-                background: 'rgba(239, 68, 68, 0.15)',
-                backdropFilter: 'blur(16px)',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                textAlign: 'center',
-                color: '#ef4444',
-                fontFamily: "'Inter', sans-serif",
-                padding: '24px'
-              }}>
-                <h3 style={{ margin: '0 0 8px 0', fontSize: '1.2rem', fontWeight: 650 }}>Backend Telemetry Unavailable</h3>
-                <p style={{ margin: 0, fontSize: '0.9rem', color: 'rgba(255, 255, 255, 0.7)', maxWidth: '360px' }}>
-                  Unable to connect to the global anomaly endpoint. Please verify server connectivity.
+              <div className="flex h-full w-full flex-col items-center justify-center px-6 text-center">
+                <span className="mb-3 h-1.5 w-1.5 rounded-full bg-industrial" />
+                <h3 className="text-[16px] font-medium text-text-primary">
+                  Backend Telemetry Unavailable
+                </h3>
+                <p className="mt-1.5 max-w-[340px] text-[15px] leading-relaxed text-text-secondary">
+                  Unable to connect to the global anomaly endpoint. Verify server connectivity.
                 </p>
               </div>
             ) : (
-              <LeafletMapSection points={filteredWorldPoints} onMarkerClick={setSelectedThreatPoint} />
+              <LeafletMapSection
+                points={filteredWorldPoints}
+                onMarkerClick={setSelectedThreatPoint}
+                selectedPoint={selectedThreatPoint}
+                onOpenDetail={setDetailPoint}
+                impactPoint={detailPoint}
+              />
             )}
           </div>
 
-          <div style={{
-            flex: '1 1 28%',
-            minWidth: '280px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between',
-            gap: '16px',
-            fontFamily: "'Inter', sans-serif"
-          }}>
-            <div style={{ position: 'relative', width: '100%' }}>
-              <input
-                type="text"
-                placeholder="Filter threat locations..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                style={{
-                  width: '100%',
-                  background: 'rgba(15, 23, 30, 0.8)',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
-                  borderRadius: '8px',
-                  padding: '12px 16px',
-                  color: '#fff',
-                  fontSize: '0.85rem',
-                  outline: 'none',
-                  boxSizing: 'border-box',
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
-                }}
+          {/* Half-window analysis panel — width animates, pushing the map left */}
+          <div
+            className={`overflow-hidden transition-[width] duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] ${
+              detailPoint ? "block lg:w-1/2" : "hidden lg:block lg:w-0"
+            }`}
+          >
+            {detailPoint && (
+              <ThreatAnalysisPanel
+                point={detailPoint}
+                onClose={() => setDetailPoint(null)}
+                isNotified={notifiedIds.includes(detailPoint.id)}
+                onNotify={() =>
+                  setNotifiedIds((prev) =>
+                    prev.includes(detailPoint.id) ? prev : [...prev, detailPoint.id]
+                  )
+                }
               />
-            </div>
+            )}
+          </div>
+
+          {/* Right panel — collapses to make room for the analysis window */}
+          <div
+            className={`flex flex-col gap-4 overflow-hidden transition-[width] duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] ${
+              detailPoint ? "lg:w-0" : "lg:w-[340px]"
+            }`}
+          >
+            <input
+              type="text"
+              placeholder="Filter threat locations..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full rounded-md border border-border-strong bg-card px-4 py-2.5 text-[15px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+            />
 
             {selectedThreatPoint ? (
-              <div style={{
-                flex: 1,
-                background: 'rgba(15, 23, 30, 0.9)',
-                backdropFilter: 'blur(16px)',
-                border: '1px solid rgba(245, 158, 11, 0.5)',
-                borderRadius: '14px',
-                padding: '20px',
-                position: 'relative',
-                boxShadow: '0 8px 25px rgba(245, 158, 11, 0.15)',
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'flex-start'
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                  <div style={{ fontSize: '1.05rem', fontWeight: 600, color: '#ffffff' }}>
-                    {selectedThreatPoint.name || 'Selected Threat'}
+              <div className="fade-up flex-1 rounded-lg border border-border-strong bg-card px-4 py-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="h-1.5 w-1.5 rounded-full"
+                        style={{ backgroundColor: selectedThreatPoint.color }}
+                      />
+                      <span className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                        {selectedThreatPoint.priority}
+                      </span>
+                    </div>
+                    <h3 className="mt-1.5 text-[16px] font-medium text-text-primary">
+                      {selectedThreatPoint.classificationLabel}
+                    </h3>
                   </div>
+
                   <button
+                    type="button"
                     onClick={() => setSelectedThreatPoint(null)}
-                    style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: '1rem' }}
+                    className="rounded-md border border-border-strong bg-raised px-2 py-0.5 font-mono text-[12.5px] text-text-secondary transition-colors hover:bg-card hover:text-text-primary"
                   >
                     ✕
                   </button>
                 </div>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', fontSize: '0.82rem', color: 'rgba(255, 255, 255, 0.85)' }}>
-                  <div style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.08)', paddingBottom: '10px' }}>
-                    <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block', marginBottom: '4px' }}>Classification</span>
-                    <strong style={{ color: '#ffffff', fontSize: '0.9rem' }}>{selectedThreatPoint.categoryLabel || selectedThreatPoint.type}</strong>
+                <div className="mt-5">
+                  <div className="flex items-baseline justify-between">
+                    <span className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                      Confidence
+                    </span>
+                    <span className="font-mono text-[38px] leading-none tabular-nums text-text-primary">
+                      {selectedThreatPoint.confidence != null
+                        ? (selectedThreatPoint.confidence * 100).toFixed(0)
+                        : "--"}
+                      <span className="text-[16px] text-text-muted">%</span>
+                    </span>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
-                    <div>
-                      <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block', marginBottom: '4px' }}>Latitude</span>
-                      <strong style={{ fontFamily: "'Courier New', monospace" }}>{selectedThreatPoint.lat ? selectedThreatPoint.lat.toFixed(4) : '--'}°</strong>
+                  <div className="mt-2.5 h-1.5 w-full rounded-sm bg-raised">
+                    <div
+                      className="score-fill h-full rounded-sm"
+                      style={{
+                        width: `${(selectedThreatPoint.confidence || 0) * 100}%`,
+                        backgroundColor: selectedThreatPoint.color,
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-5 grid grid-cols-2 gap-x-3 gap-y-4 border-t border-border-soft pt-4">
+                  <div>
+                    <div className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                      Latitude
                     </div>
-                    <div>
-                      <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block', marginBottom: '4px' }}>Longitude</span>
-                      <strong style={{ fontFamily: "'Courier New', monospace" }}>{selectedThreatPoint.lng ? selectedThreatPoint.lng.toFixed(4) : '--'}°</strong>
+                    <div className="mt-1 font-mono text-[15px] tabular-nums text-text-primary">
+                      {selectedThreatPoint.lat != null ? selectedThreatPoint.lat.toFixed(4) : "--"}°
                     </div>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
-                    <div>
-                      <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block', marginBottom: '4px' }}>Radiative Power</span>
-                      <strong style={{ color: '#f59e0b', fontSize: '0.9rem' }}>{selectedThreatPoint.frp_mw || '--'} MW</strong>
+                  <div>
+                    <div className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                      Longitude
                     </div>
-                    <div>
-                      <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block', marginBottom: '4px' }}>Confidence Score</span>
-                      <strong>{selectedThreatPoint.score ? `${(selectedThreatPoint.score * 100).toFixed(1)}%` : 'N/A'}</strong>
+                    <div className="mt-1 font-mono text-[15px] tabular-nums text-text-primary">
+                      {selectedThreatPoint.lng != null ? selectedThreatPoint.lng.toFixed(4) : "--"}°
                     </div>
                   </div>
 
-                  <div style={{ borderTop: '1px solid rgba(255, 255, 255, 0.08)', paddingTop: '12px' }}>
-                    <span style={{ color: 'rgba(255, 255, 255, 0.45)', display: 'block', marginBottom: '4px' }}>Detection Timestamp</span>
-                    <strong>{selectedThreatPoint.acq_date || 'Live Stream / Recent Pass'}</strong>
+                  <div>
+                    <div className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                      Radiative Power
+                    </div>
+                    <div className="mt-1 font-mono text-[15px] tabular-nums text-text-primary">
+                      {selectedThreatPoint.frp_mw ?? "--"} MW
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.info("PDF export will be available soon.");
-                    }}
-                    style={{
-                      width: '100%',
-                      marginTop: '4px',
-                      padding: '12px 16px',
-                      borderRadius: '8px',
-                      border: '1px solid rgba(245, 158, 11, 0.75)',
-                      background: 'rgba(245, 158, 11, 0.10)',
-                      color: '#fbbf24',
-                      fontSize: '0.78rem',
-                      fontWeight: 700,
-                      letterSpacing: '0.12em',
-                      textTransform: 'uppercase',
-                      cursor: 'pointer',
-                      transition: 'all 0.25s ease',
-                      boxShadow: '0 0 14px rgba(245, 158, 11, 0.10)'
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.background = 'rgba(245, 158, 11, 0.22)';
-                      e.currentTarget.style.boxShadow = '0 0 20px rgba(245, 158, 11, 0.28)';
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.background = 'rgba(245, 158, 11, 0.10)';
-                      e.currentTarget.style.boxShadow = '0 0 14px rgba(245, 158, 11, 0.10)';
-                    }}
-                  >
-                    ↓ Export as PDF
-                  </button>
+
+                  <div>
+                    <div className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                      Brightness
+                    </div>
+                    <div className="mt-1 font-mono text-[15px] tabular-nums text-text-primary">
+                      {selectedThreatPoint.brightness_k ?? "--"} K
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                      Satellite
+                    </div>
+                    <div className="mt-1 font-sans text-[15px] text-text-primary">
+                      {selectedThreatPoint.satellite || "--"}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                      H3 cell
+                    </div>
+                    <div className="mt-1 font-mono text-[13px] text-text-secondary">
+                      {selectedThreatPoint.h3_index || "--"}
+                    </div>
+                  </div>
+
+                  <div className="col-span-2 border-t border-border-soft pt-4">
+                    <div className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                      Detected
+                    </div>
+                    <div className="mt-1 font-mono text-[15px] tabular-nums text-text-secondary">
+                      {selectedThreatPoint.detected_at
+                        ? `${selectedThreatPoint.detected_at.replace("T", " ").slice(0, 16)} UTC`
+                        : "--"}
+                    </div>
+                  </div>
+
+                  <div className="col-span-2">
+                    <button
+                      type="button"
+                      onClick={() => setDetailPoint(selectedThreatPoint)}
+                      className="w-full rounded-md border border-accent bg-accent px-4 py-2.5 font-sans text-[12.5px] font-bold uppercase tracking-[0.15em] text-on-accent transition-colors hover:border-accent-hover hover:bg-accent-hover"
+                    >
+                      Open Analysis
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : (
-              <div style={{
-                flex: 1,
-                background: 'rgba(15, 23, 30, 0.35)',
-                border: '1px dashed rgba(255, 255, 255, 0.15)',
-                borderRadius: '14px',
-                padding: '24px',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                textAlign: 'center',
-                color: 'rgba(255, 255, 255, 0.5)',
-                fontSize: '0.85rem'
-              }}>
+              <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed border-border-soft px-6 py-12 text-center text-[15px] leading-relaxed text-text-muted">
                 Click any marker on the map to inspect live threat details.
               </div>
             )}
-
-            <div style={{
-              background: 'rgba(15, 23, 30, 0.6)',
-              backdropFilter: 'blur(16px)',
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              borderRadius: '14px',
-              padding: '18px 20px'
-            }}>
-              <h3 style={{
-                margin: '0 0 10px 0',
-                fontFamily: "'Baumans', cursive",
-                fontSize: '1.1rem',
-                color: '#f59e0b',
-                letterSpacing: '0.05em',
-                textTransform: 'uppercase'
-              }}>
-                Threat Legend
-              </h3>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 8px rgba(34, 197, 94, 0.6)' }} />
-                  <span style={{ fontSize: '0.8rem', color: 'rgba(255, 255, 255, 0.9)', fontWeight: 500 }}>
-                    Forest Fire / Wildfire
-                  </span>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#eab308', boxShadow: '0 0 8px rgba(234, 179, 8, 0.6)' }} />
-                  <span style={{ fontSize: '0.8rem', color: 'rgba(255, 255, 255, 0.9)', fontWeight: 500 }}>
-                    Refineries / Gas Flares
-                  </span>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#ef4444', boxShadow: '0 0 8px rgba(239, 68, 68, 0.6)' }} />
-                  <span style={{ fontSize: '0.8rem', color: 'rgba(255, 255, 255, 0.9)', fontWeight: 500 }}>
-                    Industrial Facilities
-                  </span>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#f97316', boxShadow: '0 0 8px rgba(249, 115, 22, 0.6)' }} />
-                  <span style={{ fontSize: '0.8rem', color: 'rgba(255, 255, 255, 0.9)', fontWeight: 500 }}>
-                    Other Active Threats
-                  </span>
-                </div>
-              </div>
-            </div>
           </div>
         </div>
       </section>

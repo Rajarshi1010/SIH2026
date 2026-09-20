@@ -15,6 +15,27 @@ function latLngToVector3(lat, lng, radius = 2.52) {
   return new THREE.Vector3(x, y, z);
 }
 
+// Outer atmosphere shell radius in RealisticGlobeMesh — the sphere's true extent.
+const GLOBE_RADIUS = 2.35;
+
+// Landing pose. Tilt is held as its own constant rather than derived from
+// LANDING_X, so the globe can be moved or resized without also rolling it.
+const LANDING_X = 5.0;
+const LANDING_Y = 0.2;
+const RESTING_X = -3.5;
+
+// On mobile the globe owns the bottom strip on its own, so it stays centred
+// and the copy/panel swap above it instead of the globe sliding sideways.
+const MOBILE_X = 0;
+const LANDING_SCALE = 1.55;
+const LANDING_TILT = 0.56;
+
+// Camera distance at each end of the roll. The globe's on-screen size is
+// proportional to scale / distance, so scaling with camera.position.z holds its
+// apparent size fixed while the camera pushes in.
+const LANDING_CAM_Z = 14;
+const RESTING_CAM_Z = 9.5;
+
 function getTargetQuaternion(lat, lng, globePos, cameraPos) {
   const phi = (90 - lat) * THREE.MathUtils.DEG2RAD;
   const theta = (lng + 180) * THREE.MathUtils.DEG2RAD;
@@ -127,6 +148,7 @@ function RedThreatMarker({ point, radius = 2.52, selectedPointId, onMarkerClick 
 }
 
 export default function InteractiveWorldGroup({
+  isMobile = false,
   scrollProgressRef,
   onLocationDenied,
   onProgressChange,
@@ -182,7 +204,7 @@ export default function InteractiveWorldGroup({
     const p = stateRef.current.smoothP;
     if (onProgressChange) onProgressChange(p);
 
-    const targetCamZ = THREE.MathUtils.lerp(14, 9.5, p);
+    const targetCamZ = THREE.MathUtils.lerp(LANDING_CAM_Z, RESTING_CAM_Z, p);
     camera.position.z = THREE.MathUtils.damp(camera.position.z, targetCamZ, 6, delta);
 
     if (p >= 1 && !stateRef.current.isFullyLocked) {
@@ -214,16 +236,30 @@ export default function InteractiveWorldGroup({
       stateRef.current.hasTriggeredRestApi = false;
     }
 
-    // Positions: Landing (2.8, 0.2) on the right -> Post-scroll (-3.5, -0.5) on the left
-    const globeX = THREE.MathUtils.lerp(2.8, -3.5, p);
-    const globeY = THREE.MathUtils.lerp(0.2, -0.5, p);
-    const globeScale = THREE.MathUtils.lerp(1.3, 1.0, p);
+    // Travel is horizontal only: X rolls right -> left, Y holds at LANDING_Y.
+    const globeY = LANDING_Y;
+    // Grow with the camera push-in so the sphere stays the size it is in the hero.
+    const globeScale = LANDING_SCALE * (camera.position.z / LANDING_CAM_Z);
+
+    // Keep the sphere inside the frustum: on a narrow or short window the
+    // visible half-width shrinks below the globe's travel and it would clip
+    // against the canvas edge. Derived from the camera rather than
+    // state.viewport, which goes stale while camera.position.z is damped.
+    const halfHeight = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * camera.position.z;
+    const halfWidth = halfHeight * camera.aspect;
+    const margin = halfWidth - GLOBE_RADIUS * globeScale;
+    const clampX = (x) => THREE.MathUtils.clamp(x, -margin, margin);
+
+    const fromX = isMobile ? MOBILE_X : LANDING_X;
+    const toX = isMobile ? MOBILE_X : RESTING_X;
+    const globeX = clampX(THREE.MathUtils.lerp(fromX, toX, p));
+    const restingX = clampX(toX);
     const currentGlobePos = new THREE.Vector3(globeX, globeY, 0);
 
     const targetQuat = getTargetQuaternion(
       targetCoords[0],
       targetCoords[1],
-      new THREE.Vector3(-3.5, -0.5, 0),
+      new THREE.Vector3(restingX, LANDING_Y, 0),
       camera.position
     );
 
@@ -234,7 +270,7 @@ export default function InteractiveWorldGroup({
         groupRef.current.scale.set(globeScale, globeScale, globeScale);
 
         stateRef.current.idleRotY += delta * 0.12 * (1 - p);
-        const rollTiltZ = (-globeX * 0.2) * (1 - p);
+        const rollTiltZ = -LANDING_TILT * (1 - p);
 
         const rollEuler = new THREE.Euler(0, stateRef.current.idleRotY, rollTiltZ, 'YXZ');
         const currentRollQuat = new THREE.Quaternion().setFromEuler(rollEuler);
@@ -253,8 +289,8 @@ export default function InteractiveWorldGroup({
       }
       if (stationaryRef.current) {
         stationaryRef.current.visible = true;
-        stationaryRef.current.position.set(-3.5, -0.5, 0);
-        stationaryRef.current.scale.set(1.0, 1.0, 1.0);
+        stationaryRef.current.position.set(restingX, LANDING_Y, 0);
+        stationaryRef.current.scale.set(globeScale, globeScale, globeScale);
         stationaryRef.current.quaternion.copy(targetQuat);
       }
     }
