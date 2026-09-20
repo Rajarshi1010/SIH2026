@@ -1,0 +1,127 @@
+"""
+backend/config.py - Production Configuration Management
+
+Implements Pydantic v2 BaseSettings for type-safe environment configuration,
+strict validation, and fallback derivations for PostgreSQL, Redis, and Geospatial parameters.
+"""
+
+from functools import lru_cache
+import json
+from typing import List, Optional, Union
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """
+    Application Settings for GeoAI Industrial Fire Classifier.
+    Reads environment variables from the OS environment and local .env files.
+    """
+
+    # --- Core Application ---
+    APP_NAME: str = "GeoAI Industrial Fire Classifier"
+    APP_ENV: str = "development"
+    DEBUG: bool = False
+    API_V1_STR: str = "/api/v1"
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+
+    # --- Security & CORS ---
+    SECRET_KEY: str = "insecure_dev_secret_key_please_override_in_production"
+    CORS_ORIGINS: Union[List[str], str] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
+        if isinstance(v, str):
+            v_trimmed = v.strip()
+            if v_trimmed.startswith("[") and v_trimmed.endswith("]"):
+                try:
+                    parsed = json.loads(v_trimmed)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed]
+                except json.JSONDecodeError:
+                    pass
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        elif isinstance(v, list):
+            return [str(item).strip() for item in v]
+        return []
+
+    # --- PostgreSQL / TimescaleDB / PostGIS ---
+    POSTGRES_USER: str = "postgres"
+    POSTGRES_PASSWORD: str = "postgres"
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_DB: str = "geoai_db"
+    DATABASE_URL: Optional[str] = None
+
+    # --- Redis Cache ---
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_PASSWORD: Optional[str] = None
+    REDIS_DB: int = 0
+    REDIS_URL: Optional[str] = None
+
+    # --- NASA FIRMS & Remote Sensing ---
+    FIRMS_MAP_KEY: Optional[str] = "cc1453ca7f4aee96699a0c8d4a63b205"
+    FIRMS_API_URL: str = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
+    # Strategic Operational Bounding Box [min_lon, min_lat, max_lon, max_lat]
+    # Default covers India: 68.0, 6.0, 97.0, 36.0
+    OPERATIONAL_BBOX: str = "68,6,97,36"
+
+    # --- Layer 5: STAC API & Optical Verification (Sentinel-2) ---
+    STAC_API_URL: str = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
+    STAC_COLLECTION: str = "sentinel-2-l2a"
+    DELTA_NBR_BURN_THRESHOLD: float = 0.27
+
+    # --- Geospatial Parameters ---
+    H3_RESOLUTION: int = Field(default=8, ge=0, le=15)
+    SPATIAL_SEARCH_RADIUS_KM: float = Field(default=5.0, gt=0.0)
+    EMITTER_MATCH_BUFFER_METERS: float = Field(default=500.0, gt=0.0)
+
+    @model_validator(mode="after")
+    def assemble_connection_strings(self) -> "Settings":
+        """Derive and normalize database and redis URLs if not explicitly configured."""
+        # Derive async DATABASE_URL
+        if not self.DATABASE_URL:
+            self.DATABASE_URL = (
+                f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
+                f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+            )
+        elif self.DATABASE_URL.startswith("postgresql://"):
+            self.DATABASE_URL = self.DATABASE_URL.replace(
+                "postgresql://", "postgresql+asyncpg://", 1
+            )
+        elif self.DATABASE_URL.startswith("postgres://"):
+            self.DATABASE_URL = self.DATABASE_URL.replace(
+                "postgres://", "postgresql+asyncpg://", 1
+            )
+
+        # Derive REDIS_URL
+        if not self.REDIS_URL:
+            auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+            self.REDIS_URL = (
+                f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+            )
+
+        return self
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """Cached accessor for singleton application settings."""
+    return Settings()
+
+
+settings = get_settings()

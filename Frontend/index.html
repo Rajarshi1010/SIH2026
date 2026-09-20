@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agnikavach - Thermal Intelligence Platform</title>
+    
+    <!-- Load custom fonts directly -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Baumans&family=Monoton&display=swap" rel="stylesheet">
+
+    <style>
+      /* Reset & Hide Scrollbars globally */
+      html, body {
+        margin: 0;
+        padding: 0;
+        background-color: #020204;
+        color: #ffffff;
+        font-family: system-ui, -apple-system, sans-serif;
+        /* `clip`, not `hidden`: `hidden` makes body a scroll container and the
+           sticky hero stops pinning */
+        overflow-x: clip;
+        -ms-overflow-style: none;  /* IE / Edge */
+        scrollbar-width: none;  /* Firefox */
+      }
+      body::-webkit-scrollbar {
+        display: none; /* Chrome / Safari / Opera */
+      }
+      
+      @keyframes bounceArrow {
+        0%, 20%, 50%, 80%, 100% { transform: translateY(0); }
+        40% { transform: translateY(-8px); }
+        60% { transform: translateY(-4px); }
+      }
+      .bounce-arrow {
+        animation: bounceArrow 2s infinite;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

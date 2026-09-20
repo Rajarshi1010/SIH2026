@@ -1,0 +1,56 @@
+# ==============================================================================
+# GeoAI Industrial Fire Classifier - Production .gitignore
+# ==============================================================================
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# Environment Variables & Secrets (Keep .env.example public)
+.env
+.env.*
+!.env.example
+
+
+
+# ML Model Artifacts & Checkpoints
+Backend/artifacts/
+*.lgb
+*.onnx
+
+# Testing, Coverage & Type Checking
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend Build & Node Dependencies
+node_modules/
+Frontend/node_modules/
+Frontend/dist/
+Frontend/build/
+*.log
+
+# Database Dumps & Local Runtimes
+*.sqlite3
+pgdata/
+data/dumps/
+data/raw/
+
+# IDE & OS Specific
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+
+scripts/run_and_compare.py
