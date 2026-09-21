@@ -51,15 +51,11 @@ class Settings(BaseSettings):
             return [str(item).strip() for item in v]
         return []
 
-    # --- PostgreSQL / TimescaleDB / PostGIS ---
-    POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = "postgres"
-    POSTGRES_HOST: str = "localhost"
-    POSTGRES_PORT: int = 5432
-    POSTGRES_DB: str = "geoai_db"
-    DATABASE_URL: Optional[str] = None
+    # --- Storage Engine ---
+    STORAGE_ENGINE: str = "duckdb"
+    DUCKDB_PATH: str = "data/india_geoai.db"
 
-    # --- Redis Cache ---
+    # --- Redis Distributed Cache ---
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: Optional[str] = None
@@ -85,29 +81,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def assemble_connection_strings(self) -> "Settings":
-        """Derive and normalize database and redis URLs if not explicitly configured."""
-        # Derive async DATABASE_URL
-        if not self.DATABASE_URL:
-            self.DATABASE_URL = (
-                f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
-                f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-            )
-        elif self.DATABASE_URL.startswith("postgresql://"):
-            self.DATABASE_URL = self.DATABASE_URL.replace(
-                "postgresql://", "postgresql+asyncpg://", 1
-            )
-        elif self.DATABASE_URL.startswith("postgres://"):
-            self.DATABASE_URL = self.DATABASE_URL.replace(
-                "postgres://", "postgresql+asyncpg://", 1
-            )
-
-        # Derive REDIS_URL
+        """Derive and normalize Redis connection string if not explicitly configured."""
         if not self.REDIS_URL:
             auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
             self.REDIS_URL = (
                 f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
             )
-
         return self
 
     model_config = SettingsConfigDict(

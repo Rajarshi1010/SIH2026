@@ -16,7 +16,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
-    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv /opt/venv
@@ -39,10 +38,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000 \
     HOST=0.0.0.0
 
-# Install runtime dependencies including libpq and curl for healthchecks
+# Install runtime dependencies (curl for healthchecks, libgomp1 for LightGBM OpenMP)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 \
     curl \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy pre-built virtual environment from builder stage
@@ -52,11 +51,17 @@ COPY --from=builder /opt/venv /opt/venv
 RUN groupadd -g 10001 appuser && \
     useradd -u 10001 -g appuser -s /bin/sh -d /app -M appuser
 
+# Pre-create data and artifacts directories with proper ownership and volume permissions
+RUN mkdir -p /app/data /app/artifacts && \
+    chmod -R 777 /app/data /app/artifacts && \
+    chown -R appuser:appuser /app
+
 # Copy application source code
 COPY . /app
 
 # Grant permissions to non-root user
-RUN chown -R appuser:appuser /app
+RUN chmod -R 777 /app/data /app/artifacts && \
+    chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER 10001
@@ -67,5 +72,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
-# Launch production ASGI server
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Launch production ASGI server (Single worker for zero-cost embedded DuckDB in-process concurrency)
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

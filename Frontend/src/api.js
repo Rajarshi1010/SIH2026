@@ -2,8 +2,8 @@ import { metaFor } from "./classifications";
 import { MOCK_FEATURES } from "./mockPoints";
 
 // Contract: FRONTEND_INTEGRATION.md
-const API_BASE_URL = "http://127.0.0.1:8000/api/v1";
-export const WS_ALERTS_URL = "ws://127.0.0.1:8000/api/v1/ws/alerts";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api/v1";
+export const WS_ALERTS_URL = import.meta.env.VITE_WS_ALERTS_URL || "ws://127.0.0.1:8000/api/v1/ws/alerts";
 
 // Demo telemetry stands in only during local development, so a production build
 // can never present placeholder fires as real detections.

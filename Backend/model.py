@@ -29,11 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import lightgbm as lgb
 import numpy as np
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from config import settings
-from database import ThermalIncident, async_session_factory
 
 logger = logging.getLogger("geoai.model")
 
@@ -63,28 +59,63 @@ CLASS_LABELS: List[str] = [
 # ------------------------------------------------------------------------------
 # 1. Feature Engineering Engine
 # ------------------------------------------------------------------------------
+def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Computes great-circle distance between two points on Earth in kilometers."""
+    r = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi / 2.0)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0)**2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return r * c
+
+
+_cached_industrial_coords: Optional[List[Tuple[float, float]]] = None
+
+
+def get_industrial_coords() -> List[Tuple[float, float]]:
+    """Loads and caches lat/lon coordinates of known emitters and industrial sites from DuckDB."""
+    global _cached_industrial_coords
+    if _cached_industrial_coords is not None:
+        return _cached_industrial_coords
+    try:
+        from database import get_duckdb
+        import h3
+        conn = get_duckdb()
+        rows = conn.execute("""
+            SELECT h3_cell FROM india_master_structures 
+            WHERE facility_name IS NOT NULL OR land_use_category = 'Industry'
+        """).fetchall()
+        coords = []
+        for (cell_int,) in rows:
+            h3_hex = hex(cell_int)[2:]
+            lat, lon = h3.cell_to_latlng(h3_hex)
+            coords.append((lat, lon))
+        _cached_industrial_coords = coords
+        return coords
+    except Exception as e:
+        logger.warning(f"Could not load industrial coordinates from DuckDB: {e}")
+        return []
+
+
 async def extract_features_for_incident(
-    incident: ThermalIncident,
-    session: AsyncSession,
+    incident: Any,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """
     Extracts numerical feature vector and context for a single thermal incident.
-    Combines satellite telemetry with real-time PostGIS spatial queries.
+    Powered by embedded DuckDB spatial index and Haversine distance calculations.
     """
     # 1. Distance to nearest industrial complex / known emitter
-    dist_query = text("""
-        SELECT 
-            COALESCE(
-                MIN(ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography)),
-                50000.0
-            ) AS min_dist_meters
-        FROM known_emitters;
-    """)
-    res = await session.execute(
-        dist_query, {"lon": incident.longitude, "lat": incident.latitude}
-    )
-    dist_meters = float(res.scalar() or 50000.0)
-    dist_km = dist_meters / 1000.0
+    dist_km = 50.0
+    coords = get_industrial_coords()
+    if coords:
+        dist_km = min(
+            haversine_distance_km(incident.latitude, incident.longitude, c_lat, c_lon)
+            for c_lat, c_lon in coords
+        )
+
 
     # 2. Thermal and Radiance features
     mir = float(incident.brightness or 300.0)
@@ -290,21 +321,19 @@ class ResidualClassifier:
 
     async def classify_incident(
         self,
-        incident: ThermalIncident,
-        session: AsyncSession,
+        incident: Any,
     ) -> Dict[str, Any]:
         """Extracts features, runs inference + TreeSHAP, and updates the incident."""
-        feat_vec, feat_dict = await extract_features_for_incident(incident, session)
+        feat_vec, feat_dict = await extract_features_for_incident(incident)
         ml_res = self.predict_with_shap(feat_vec, feat_dict)
 
-        # Update ORM attributes
+        # Update attributes
         incident.classification = ml_res["predicted_class"]
         incident.classification_confidence = ml_res["confidence"]
         incident.is_industrial = ml_res["is_industrial"]
 
         # Store TreeSHAP explanations in raw_metadata
-        from sqlalchemy.orm.attributes import flag_modified
-        meta = dict(incident.raw_metadata or {})
+        meta = dict(getattr(incident, "raw_metadata", None) or {})
         meta.update({
             "pipeline_stage": "LAYER_4_LIGHTGBM_SHAP",
             "features": feat_dict,
@@ -312,8 +341,6 @@ class ResidualClassifier:
             "shap_attribution": ml_res["shap_attribution"],
         })
         incident.raw_metadata = meta
-        flag_modified(incident, "raw_metadata")
-
         return ml_res
 
 

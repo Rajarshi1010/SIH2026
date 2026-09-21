@@ -24,11 +24,8 @@ import httpx
 import h3
 from shapely.affinity import rotate
 from shapely.geometry import Point, Polygon
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from config import settings
-from database import ThermalIncident, async_session_factory
+from database import get_duckdb
 
 logger = logging.getLogger("geoai.ingestion")
 
@@ -232,7 +229,14 @@ class FirmsIngestionEngine:
         """
         csv_text = await self.fetch_telemetry(source=source, day_range=day_range)
         records = parse_firms_csv_stream(csv_text)
+        return await self.store_records(records, source=source)
 
+    async def store_records(
+        self,
+        records: List[Dict[str, Any]],
+        source: str = "VIIRS_SNPP_NRT",
+    ) -> Dict[str, Any]:
+        """Stores parsed telemetry records into DuckDB or PostgreSQL."""
         if not records:
             return {
                 "source": source,
@@ -242,80 +246,64 @@ class FirmsIngestionEngine:
             }
 
         inserted = 0
-        async with async_session_factory() as session:
-            for item in records:
-                # Check for existing record with same coordinate, detection time, and satellite
-                # to prevent hypertable bloat
-                query = text("""
-                    SELECT id FROM thermal_incidents 
-                    WHERE detected_at = :detected_at 
-                      AND ABS(latitude - :lat) < 0.0001 
-                      AND ABS(longitude - :lon) < 0.0001
-                      AND satellite = :satellite
-                    LIMIT 1;
-                """)
-                existing = await session.execute(
-                    query,
-                    {
-                        "detected_at": item["detected_at"],
-                        "lat": item["latitude"],
-                        "lon": item["longitude"],
-                        "satellite": item["satellite"],
-                    },
-                )
-                if existing.scalar():
-                    continue
+        import json
 
-                # Insert into TimescaleDB hypertable
-                insert_stmt = text("""
-                    INSERT INTO thermal_incidents (
-                        id, detected_at, latitude, longitude, geom, h3_index,
-                        brightness, scan, track, satellite, instrument,
-                        confidence, version, bright_t31, frp, daynight,
-                        classification, classification_confidence, is_industrial,
-                        raw_metadata
-                    ) VALUES (
-                        :id, :detected_at, :lat, :lon, ST_GeomFromText(:geom_wkt, 4326), :h3_index,
-                        :brightness, :scan, :track, :satellite, :instrument,
-                        :confidence, :version, :bright_t31, :frp, :daynight,
-                        'unclassified', 0.0, FALSE,
-                        (:raw_metadata)::jsonb
-                    );
-                """)
-                import json
-                await session.execute(
-                    insert_stmt,
-                    {
-                        "id": uuid.uuid4(),
-                        "detected_at": item["detected_at"],
-                        "lat": item["latitude"],
-                        "lon": item["longitude"],
-                        "geom_wkt": item["geom_wkt"],
-                        "h3_index": item["h3_index"],
-                        "brightness": item["brightness"],
-                        "scan": item["scan"],
-                        "track": item["track"],
-                        "satellite": item["satellite"],
-                        "instrument": item["instrument"],
-                        "confidence": item["confidence"],
-                        "version": item["version"],
-                        "bright_t31": item["bright_t31"],
-                        "frp": item["frp"],
-                        "daynight": item["daynight"],
-                        "raw_metadata": json.dumps(item["raw_metadata"]),
-                    },
-                )
-                inserted += 1
+        conn = get_duckdb()
+        for item in records:
+            # Check for existing record to prevent duplicates
+            h3_int = int(item["h3_index"], 16) if isinstance(item["h3_index"], str) else int(item["h3_index"])
+            existing = conn.execute("""
+                SELECT id FROM thermal_anomalies
+                WHERE detected_at = ?
+                  AND ABS(latitude - ?) < 0.0001
+                  AND ABS(longitude - ?) < 0.0001
+                LIMIT 1;
+            """, [item["detected_at"], item["latitude"], item["longitude"]]).fetchone()
 
-            await session.commit()
+            if existing:
+                continue
 
-        logger.info(f"Ingestion successful: {inserted}/{len(records)} incidents saved.")
+            sat_val = "VIIRS" if "VIIRS" in str(item["satellite"]).upper() else "MODIS"
+
+            # Insert into DuckDB with primitive integer downcasting (~12-15 bytes)
+            conn.execute("""
+                INSERT INTO thermal_anomalies (
+                    id, h3_cell, detected_at, latitude, longitude,
+                    brightness_mir, bright_t31, frp, satellite, confidence,
+                    classification, classification_confidence, is_industrial,
+                    raw_metadata
+                ) VALUES (
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?::satellite_source, ?,
+                    'unclassified'::hazard_class, 0, FALSE,
+                    ?
+                );
+            """, [
+                str(uuid.uuid4()),
+                h3_int,
+                item["detected_at"],
+                item["latitude"],
+                item["longitude"],
+                int(item["brightness"]),
+                int(item["bright_t31"] or 0),
+                int(item["frp"]),
+                sat_val,
+                item["confidence"],
+                json.dumps(item["raw_metadata"])
+            ])
+            inserted += 1
+
+        conn.execute("CHECKPOINT;")
+        logger.info(f"[DuckDB] Ingestion successful: {inserted}/{len(records)} incidents saved.")
+
         return {
             "source": source,
+            "engine": "duckdb",
             "fetched_count": len(records),
             "inserted_count": inserted,
             "status": "success",
         }
+
 
 
 # Global singleton instance

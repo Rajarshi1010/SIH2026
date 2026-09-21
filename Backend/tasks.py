@@ -54,9 +54,15 @@ class TelemetryPollingWorker:
 
         # 2. Pipeline Execution (Layers 2, 3, 4, 5)
         pipeline_res = {}
-        if new_incidents > 0:
+        from database import get_duckdb
+        conn = get_duckdb()
+        unclass_count = conn.execute("SELECT count(*) FROM thermal_anomalies WHERE classification = 'unclassified';").fetchone()[0]
+
+        if new_incidents > 0 or unclass_count > 0:
+            batch_size = max(new_incidents + unclass_count, 150)
+            logger.info(f"Triggering pipeline for {unclass_count} unclassified incidents ({new_incidents} freshly ingested)...")
             pipeline_res = await deterministic_pipeline.run_batch(
-                batch_limit=new_incidents + 20, target_stage="all"
+                batch_limit=batch_size, target_stage="all"
             )
             logger.info(f"Pipeline executed: {pipeline_res.get('breakdown', {})}")
 
@@ -67,6 +73,7 @@ class TelemetryPollingWorker:
                     "event": "new_telemetry_batch",
                     "timestamp": cycle_start.isoformat(),
                     "inserted_count": new_incidents,
+                    "processed_count": pipeline_res.get("processed_count", 0),
                     "pipeline_breakdown": pipeline_res.get("breakdown", {}),
                 })
             except Exception as e:

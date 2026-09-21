@@ -5,9 +5,9 @@ Implements the zero-latency, high-precision filtering and attribution stages
 as mandated by spec.md:
 
 1. LAYER 2: Known-Emitter Registry (KER) Fast-Path Matching
-   - Dual-mode spatial matching:
+   - Spatial matching:
      a) O(1) H3 Hexagonal Cell lookup (k-ring neighborhood).
-     b) PostGIS ST_DWithin ellipsoidal geodesic distance verification.
+     b) Geodesic Haversine distance verification against DuckDB master structures.
    - Fire Radiative Power (FRP) Z-score anomaly detector:
      If baseline FRP matches historical emitter statistics (Z-score < 2.0),
      assign "PERSISTENT_INDUSTRIAL_SOURCE" (Bypasses ML entirely).
@@ -37,12 +37,8 @@ import uuid
 
 import httpx
 import h3
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm.attributes import flag_modified
-
 from config import settings
-from database import KnownEmitter, ReviewQueue, ThermalIncident, async_session_factory
+from database import get_duckdb
 
 logger = logging.getLogger("geoai.pipeline")
 
@@ -196,92 +192,124 @@ def estimate_planck_temperature(
 # ------------------------------------------------------------------------------
 # 2. Layer 2: Known Emitter Registry (KER) Fast-Path
 # ------------------------------------------------------------------------------
+def _haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculates haversine distance in meters."""
+    r = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = math.sin(delta_phi / 2.0)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0)**2
+    return r * 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+
+
+class IncidentAdapter:
+    """Lightweight duck-typing adapter normalizing incident attributes across DuckDB and ORM."""
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+        if not hasattr(self, "brightness") and hasattr(self, "brightness_mir"):
+            self.brightness = float(getattr(self, "brightness_mir", 300.0))
+        if not hasattr(self, "h3_index") and hasattr(self, "h3_cell"):
+            self.h3_index = hex(self.h3_cell)[2:] if getattr(self, "h3_cell", None) else ""
+
+
 async def evaluate_ker_fastpath(
-    incident: ThermalIncident,
-    session: AsyncSession,
+    incident: Any,
 ) -> Optional[Dict[str, Any]]:
     """
     Executes Layer 2 Fast-Path:
     1. Checks H3 cell (k-ring 1 neighborhood, ~500m aperture).
-    2. Executes geodesic distance query ST_DWithin against known_emitters.
+    2. Executes geodesic distance query against known emitters/structures in DuckDB.
     3. If matched, calculates FRP Z-score.
     """
     # Step 1: H3 neighborhood check
-    incident_h3 = incident.h3_index or h3.latlng_to_cell(
-        incident.latitude, incident.longitude, settings.H3_RESOLUTION
-    )
-    # k-ring 1 yields the cell and its 6 immediate hexagonal neighbors
-    neighbors = h3.grid_disk(incident_h3, 1) if hasattr(h3, "grid_disk") else [incident_h3]
+    incident_h3 = getattr(incident, "h3_index", None)
+    if not incident_h3 or not (hasattr(h3, "is_valid_cell") and h3.is_valid_cell(str(incident_h3))):
+        incident_h3 = h3.latlng_to_cell(
+            incident.latitude, incident.longitude, settings.H3_RESOLUTION
+        )
+    neighbors = list(h3.grid_disk(incident_h3, 1)) if hasattr(h3, "grid_disk") else [incident_h3]
 
-    # Step 2: Spatial query against PostGIS known_emitters
-    # Combines H3 candidate filtering with high-precision ST_DWithin geodesic calculation
-    query = text("""
-        SELECT 
-            id, name, category, buffer_radius_meters, confidence_score, metadata,
-            ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography) AS dist_meters
-        FROM known_emitters
-        WHERE h3_index = ANY(:h3_list)
-           OR ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography, 3000.0)
-        ORDER BY dist_meters ASC
+    conn = get_duckdb()
+    neighbor_ints = [int(h, 16) for h in neighbors]
+    placeholders = ",".join(["?"] * len(neighbor_ints))
+
+    # 1. Exact or k-ring 1 match in india_master_structures
+    row = conn.execute(f"""
+        SELECT h3_cell, facility_name, baseline_frp_mw, land_use_category
+        FROM india_master_structures
+        WHERE h3_cell IN ({placeholders})
         LIMIT 1;
-    """)
+    """, neighbor_ints).fetchone()
 
-    result = await session.execute(
-        query,
-        {
-            "lon": incident.longitude,
-            "lat": incident.latitude,
-            "h3_list": list(neighbors),
-        },
-    )
-    emitter = result.mappings().first()
+    matched_site = None
+    if row and (row[1] is not None or row[3] == "Industry"):
+        matched_site = {
+            "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, str(row[0]))),
+            "name": row[1] or "Industrial Facility",
+            "baseline_frp": float(row[2] or 40.0),
+            "dist": 0.0,
+        }
+    else:
+        # 2. Check distance to strategic emitters (within 3000m)
+        sites = conn.execute("""
+            SELECT h3_cell, facility_name, baseline_frp_mw
+            FROM india_master_structures
+            WHERE facility_name IS NOT NULL;
+        """).fetchall()
 
-    if not emitter:
-        return None
+        closest = None
+        min_dist = float("inf")
+        for cell_id, fac_name, base_frp in sites:
+            fac_hex = hex(cell_id)[2:]
+            f_lat, f_lon = h3.cell_to_latlng(fac_hex)
+            d_m = _haversine_distance_m(incident.latitude, incident.longitude, f_lat, f_lon)
+            if d_m < min_dist:
+                min_dist = d_m
+                closest = (cell_id, fac_name, base_frp, d_m)
 
-    dist = float(emitter["dist_meters"])
-    allowed_buffer = float(emitter["buffer_radius_meters"])
+        if closest and closest[3] <= 3000.0:
+            matched_site = {
+                "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, str(closest[0]))),
+                "name": closest[1],
+                "baseline_frp": float(closest[2] or 40.0),
+                "dist": closest[3],
+            }
 
-    # If within the emitter's spatial perimeter
-    if dist <= allowed_buffer:
-        emitter_meta = emitter["metadata"] or {}
-        baseline_frp = float(emitter_meta.get("expected_baseline_frp_mw", 40.0))
+    if matched_site:
+        baseline_frp = matched_site["baseline_frp"]
         frp_std_dev = max(baseline_frp * 0.35, 5.0)
+        frp_z_score = (float(incident.frp) - baseline_frp) / frp_std_dev
 
-        # FRP Z-Score: (current_frp - baseline) / std_dev
-        frp_z_score = (incident.frp - baseline_frp) / frp_std_dev
-
-        # Anomaly threshold check
         if frp_z_score >= 2.5:
-            # Massive abnormal thermal surge at known industrial complex -> EMERGENCE ALERT
             return {
                 "matched": True,
-                "emitter_id": emitter["id"],
-                "emitter_name": emitter["name"],
-                "distance_meters": round(dist, 1),
+                "emitter_id": matched_site["id"],
+                "emitter_name": matched_site["name"],
+                "distance_meters": round(matched_site["dist"], 1),
                 "classification": "INDUSTRIAL_FIRE_ALERT",
                 "confidence": 0.95,
                 "is_industrial": True,
                 "frp_z_score": round(frp_z_score, 2),
                 "alert": True,
                 "notes": (
-                    f"Thermal surge at {emitter['name']}: FRP={incident.frp:.1f}MW "
+                    f"Thermal surge at {matched_site['name']}: FRP={incident.frp:.1f}MW "
                     f"(Baseline={baseline_frp:.1f}MW, Z-Score={frp_z_score:.2f})"
                 ),
             }
         else:
-            # Normal routine operations / regulated flare
             return {
                 "matched": True,
-                "emitter_id": emitter["id"],
-                "emitter_name": emitter["name"],
-                "distance_meters": round(dist, 1),
+                "emitter_id": matched_site["id"],
+                "emitter_name": matched_site["name"],
+                "distance_meters": round(matched_site["dist"], 1),
                 "classification": "PERSISTENT_INDUSTRIAL_SOURCE",
                 "confidence": 0.98,
                 "is_industrial": True,
                 "frp_z_score": round(frp_z_score, 2),
                 "alert": False,
-                "notes": f"Routine emitter thermal footprint matching {emitter['name']}.",
+                "notes": f"Routine emitter thermal footprint matching {matched_site['name']}.",
             }
 
     return None
@@ -291,7 +319,7 @@ async def evaluate_ker_fastpath(
 # 3. Layer 3: Deterministic Pyrometry & Solar Glint Pre-Filter
 # ------------------------------------------------------------------------------
 def evaluate_pyrometry_and_glint(
-    incident: ThermalIncident,
+    incident: Any,
 ) -> Optional[Dict[str, Any]]:
     """
     Executes Layer 3 Filters:
@@ -342,12 +370,12 @@ class DeterministicPipeline:
 
     async def process_incident(
         self,
-        incident: ThermalIncident,
-        session: AsyncSession,
+        incident: Any,
+        session: Any = None,
     ) -> Dict[str, Any]:
         """Runs an individual incident through Layer 2 & Layer 3."""
         # 1. Layer 2: Known Emitter Fast-Path
-        ker_result = await evaluate_ker_fastpath(incident, session)
+        ker_result = await evaluate_ker_fastpath(incident)
         if ker_result:
             incident.classification = ker_result["classification"]
             incident.classification_confidence = ker_result["confidence"]
@@ -356,7 +384,7 @@ class DeterministicPipeline:
             incident.distance_to_emitter_meters = ker_result["distance_meters"]
             
             # Enrich raw_metadata
-            meta = incident.raw_metadata or {}
+            meta = dict(getattr(incident, "raw_metadata", None) or {})
             meta.update({
                 "ker_matched": True,
                 "emitter_name": ker_result["emitter_name"],
@@ -367,17 +395,20 @@ class DeterministicPipeline:
 
             # If anomaly alert triggered, push to ReviewQueue (HITL)
             if ker_result.get("alert"):
-                review = ReviewQueue(
-                    id=uuid.uuid4(),
-                    incident_id=incident.id,
-                    incident_detected_at=incident.detected_at,
-                    status="pending",
-                    priority="high",
-                    ai_classification=ker_result["classification"],
-                    ai_confidence=ker_result["confidence"],
-                    reviewer_notes=ker_result["notes"],
-                )
-                session.add(review)
+                conn = get_duckdb()
+                conn.execute("""
+                    INSERT INTO review_queue (
+                        id, incident_id, incident_detected_at, status, priority,
+                        ai_classification, ai_confidence, reviewer_notes
+                    ) VALUES (?, ?, ?, 'pending', 'high', ?, ?, ?);
+                """, [
+                    str(uuid.uuid4()),
+                    str(incident.id),
+                    incident.detected_at,
+                    ker_result["classification"],
+                    float(ker_result["confidence"]),
+                    ker_result["notes"],
+                ])
 
             return ker_result
 
@@ -388,7 +419,7 @@ class DeterministicPipeline:
             incident.classification_confidence = pyro_result["confidence"]
             incident.is_industrial = pyro_result["is_industrial"]
 
-            meta = incident.raw_metadata or {}
+            meta = dict(getattr(incident, "raw_metadata", None) or {})
             meta.update({
                 "pyrometry_rule": pyro_result["rule"],
                 "t_combustion_k": pyro_result.get("t_combustion_k"),
@@ -399,7 +430,7 @@ class DeterministicPipeline:
 
         # 3. Layer 4: Residual Machine Learning Classifier (LightGBM + TreeSHAP)
         from model import residual_classifier
-        ml_res = await residual_classifier.classify_incident(incident, session)
+        ml_res = await residual_classifier.classify_incident(incident)
         
         # 4. Layer 5: Conditional Multi-Tier Verification for High-Risk Inferences
         # Triggers for Unmapped Industrial Accidents or low confidence alerts
@@ -407,27 +438,32 @@ class DeterministicPipeline:
             verification = await verify_incident_burn_scar(
                 incident.latitude, incident.longitude, incident.detected_at
             )
-            meta = dict(incident.raw_metadata or {})
+            meta = dict(getattr(incident, "raw_metadata", None) or {})
             meta["layer_5_verification"] = verification
             incident.raw_metadata = meta
-            flag_modified(incident, "raw_metadata")
 
             # Push to ReviewQueue with verification context
-            review = ReviewQueue(
-                id=uuid.uuid4(),
-                incident_id=incident.id,
-                incident_detected_at=incident.detected_at,
-                status="pending",
-                priority="high" if ml_res["predicted_class"] == "UNMAPPED_INDUSTRIAL_ACCIDENT" else "medium",
-                ai_classification=ml_res["predicted_class"],
-                ai_confidence=ml_res["confidence"],
-                reviewer_notes=(
-                    f"Layer 4 ML routed to HITL: Class={ml_res['predicted_class']}, "
-                    f"Conf={ml_res['confidence']:.2f}. "
-                    f"Layer 5 Verification: Tier={verification.get('tier')}, Status={verification.get('status')}"
-                ),
+            priority_val = "high" if ml_res["predicted_class"] == "UNMAPPED_INDUSTRIAL_ACCIDENT" else "medium"
+            notes_val = (
+                f"Layer 4 ML routed to HITL: Class={ml_res['predicted_class']}, "
+                f"Conf={ml_res['confidence']:.2f}. "
+                f"Layer 5 Verification: Tier={verification.get('tier')}, Status={verification.get('status')}"
             )
-            session.add(review)
+            conn = get_duckdb()
+            conn.execute("""
+                INSERT INTO review_queue (
+                    id, incident_id, incident_detected_at, status, priority,
+                    ai_classification, ai_confidence, reviewer_notes
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?);
+            """, [
+                str(uuid.uuid4()),
+                str(incident.id),
+                incident.detected_at,
+                priority_val,
+                ml_res["predicted_class"],
+                float(ml_res["confidence"]),
+                notes_val,
+            ])
 
         return {
             "classification": ml_res["predicted_class"],
@@ -443,25 +479,31 @@ class DeterministicPipeline:
         target_stage: str = "all",
     ) -> Dict[str, Any]:
         """
-        Processes incidents from TimescaleDB:
+        Processes incidents from DuckDB or TimescaleDB:
         - If target_stage == 'all' or 'unclassified': processes unclassified records through Layers 2, 3, & 4.
         - If target_stage == 'residuals': re-processes records currently tagged as RESIDUAL_CANDIDATE through Layer 4 ML.
         """
-        async with async_session_factory() as session:
+        if settings.STORAGE_ENGINE == "duckdb":
+            from database import get_duckdb
+            import json
+            conn = get_duckdb()
+
             filter_clause = (
                 "classification = 'RESIDUAL_CANDIDATE'"
                 if target_stage == "residuals"
                 else "classification IN ('unclassified', 'RESIDUAL_CANDIDATE')"
             )
-            stmt = text(f"""
-                SELECT id, detected_at 
-                FROM thermal_incidents 
+
+            rows = conn.execute(f"""
+                SELECT id, h3_cell, detected_at, latitude, longitude,
+                       brightness_mir, bright_t31, frp, satellite, confidence,
+                       classification, classification_confidence, is_industrial,
+                       emitter_id, distance_to_emitter_meters, raw_metadata
+                FROM thermal_anomalies
                 WHERE {filter_clause}
                 ORDER BY detected_at DESC
-                LIMIT :limit;
-            """)
-            result = await session.execute(stmt, {"limit": batch_limit})
-            rows = result.all()
+                LIMIT ?;
+            """, [batch_limit]).fetchall()
 
             if not rows:
                 return {
@@ -473,19 +515,66 @@ class DeterministicPipeline:
             stats: Dict[str, int] = {}
 
             for row in rows:
-                incident = await session.get(
-                    ThermalIncident, (row.id, row.detected_at)
+                raw_meta = json.loads(row[15]) if isinstance(row[15], str) else (row[15] or {})
+                raw_h3_hex = hex(row[1])[2:] if row[1] else ""
+                h3_hex = (
+                    raw_h3_hex
+                    if (raw_h3_hex and hasattr(h3, "is_valid_cell") and h3.is_valid_cell(raw_h3_hex))
+                    else h3.latlng_to_cell(row[3], row[4], settings.H3_RESOLUTION)
                 )
-                if not incident:
-                    continue
 
-                res = await self.process_incident(incident, session)
+                inc = IncidentAdapter(
+                    id=row[0],
+                    h3_cell=row[1],
+                    h3_index=h3_hex,
+                    detected_at=row[2],
+                    latitude=row[3],
+                    longitude=row[4],
+                    brightness=float(row[5] or 300.0),
+                    bright_t31=float(row[6]) if row[6] is not None else None,
+                    frp=float(row[7] or 0.0),
+                    satellite=str(row[8]),
+                    confidence=str(row[9]),
+                    daynight=raw_meta.get("daynight", "D"),
+                    scan=raw_meta.get("scan", 0.375),
+                    track=raw_meta.get("track", 0.375),
+                    classification=str(row[10]),
+                    classification_confidence=row[11],
+                    is_industrial=bool(row[12]),
+                    emitter_id=row[13],
+                    distance_to_emitter_meters=row[14],
+                    raw_metadata=raw_meta,
+                )
+
+                res = await self.process_incident(inc)
                 c_type = res["classification"]
                 stats[c_type] = stats.get(c_type, 0) + 1
                 processed += 1
 
-            await session.commit()
+                # Normalize confidence to UTINYINT (0-100)
+                conf_val = inc.classification_confidence
+                conf_int = int(round(conf_val * 100)) if isinstance(conf_val, float) else int(conf_val or 0)
 
+                conn.execute("""
+                    UPDATE thermal_anomalies SET
+                        classification = ?::hazard_class,
+                        classification_confidence = ?,
+                        is_industrial = ?,
+                        emitter_id = ?,
+                        distance_to_emitter_meters = ?,
+                        raw_metadata = ?
+                    WHERE id = ?;
+                """, [
+                    inc.classification,
+                    conf_int,
+                    inc.is_industrial,
+                    str(inc.emitter_id) if inc.emitter_id else None,
+                    inc.distance_to_emitter_meters,
+                    json.dumps(inc.raw_metadata),
+                    str(inc.id),
+                ])
+
+            conn.execute("CHECKPOINT;")
             return {
                 "status": "success",
                 "processed_count": processed,
@@ -495,3 +584,4 @@ class DeterministicPipeline:
 
 # Global singleton instance
 deterministic_pipeline = DeterministicPipeline()
+
