@@ -113,9 +113,9 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
           />
           <div className="col-span-2">
             <Readout
-              label="Emitter ID"
-              value={point.emitter_id || 'Unmapped, no registered emitter'}
-              mono={Boolean(point.emitter_id)}
+              label="Facility / Asset Name"
+              value={point.emitter_name || (point.emitter_id ? `Registered Asset (${point.emitter_id.slice(0, 8)}...)` : 'Regional Landscape (No Registered Industrial Asset)')}
+              mono={!point.emitter_name && Boolean(point.emitter_id)}
             />
           </div>
         </div>

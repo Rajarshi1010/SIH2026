@@ -313,6 +313,7 @@ async def list_incidents(
                 "classification": str(r[9]),
                 "classification_confidence": conf_val,
                 "is_industrial": bool(r[11]),
+                "emitter_name": raw_meta.get("emitter_name"),
                 "pipeline_stage": raw_meta.get("pipeline_stage"),
                 "shap_attribution": raw_meta.get("shap_attribution"),
             })
@@ -491,6 +492,7 @@ async def get_gis_feature_collection(
                     "h3_index": h3_hex,
                     "marker_color": color,
                     "emitter_id": str(r[12]) if r[12] else None,
+                    "emitter_name": raw_meta.get("emitter_name"),
                     "distance_to_emitter_meters": float(r[13]) if r[13] is not None else None,
                     "shap_attribution": raw_meta.get("shap_attribution"),
                     "verification": raw_meta.get("layer_5_verification"),

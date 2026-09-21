@@ -33,6 +33,7 @@ export const normalizeFeature = (feature, idx = 0) => {
     satellite: props.satellite || null,
     is_industrial: Boolean(props.is_industrial),
     emitter_id: props.emitter_id ?? null,
+    emitter_name: props.emitter_name ?? null,
     distance_to_emitter_m: props.distance_to_emitter_meters ?? null,
     shap: props.shap_attribution || null,
     footprint: props.footprint_polygon || null,
