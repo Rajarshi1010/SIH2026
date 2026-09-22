@@ -2,8 +2,8 @@ import { metaFor } from "./classifications";
 import { MOCK_FEATURES } from "./mockPoints";
 
 // Contract: FRONTEND_INTEGRATION.md
-const API_BASE_URL = "http://127.0.0.1:8000/api/v1";
-export const WS_ALERTS_URL = "ws://127.0.0.1:8000/api/v1/ws/alerts";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api/v1";
+export const WS_ALERTS_URL = import.meta.env.VITE_WS_ALERTS_URL || "ws://127.0.0.1:8000/api/v1/ws/alerts";
 
 // Demo telemetry stands in only during local development, so a production build
 // can never present placeholder fires as real detections.
@@ -33,6 +33,7 @@ export const normalizeFeature = (feature, idx = 0) => {
     satellite: props.satellite || null,
     is_industrial: Boolean(props.is_industrial),
     emitter_id: props.emitter_id ?? null,
+    emitter_name: props.emitter_name ?? null,
     distance_to_emitter_m: props.distance_to_emitter_meters ?? null,
     shap: props.shap_attribution || null,
     footprint: props.footprint_polygon || null,

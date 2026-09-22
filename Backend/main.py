@@ -1,9 +1,17 @@
 """
 backend/main.py - GeoAI Industrial Fire Classifier API Entrypoint
 
-Configures FastAPI lifespan management, asynchronous health probes for PostgreSQL/PostGIS
-and Redis, CORS middleware, and production-grade monitoring endpoints.
+Configures FastAPI lifespan management, embedded DuckDB storage engine,
+Redis cache and pub/sub, CORS middleware, and production-grade monitoring endpoints.
 """
+
+import sys
+from pathlib import Path
+
+# Ensure backend directory is in sys.path regardless of execution root
+_backend_dir = Path(__file__).resolve().parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -11,14 +19,11 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
-from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import redis.asyncio as aioredis
-from sqlalchemy import text
-
 from config import settings
-from database import engine
 from schemas import SystemHealthResponse
 
 # Configure structured application logging
@@ -33,10 +38,10 @@ logger = logging.getLogger("geoai_api")
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     Application lifespan manager.
-    Validates PostgreSQL + PostGIS extension and Redis connectivity on boot.
+    Initializes embedded DuckDB engine, Redis cache, and background polling worker.
     Gracefully disposes connections on shutdown.
     """
-    logger.info("Initializing %s (Env: %s)...", settings.APP_NAME, settings.APP_ENV)
+    logger.info("Initializing %s (Env: %s, Storage: DuckDB In-Process)...", settings.APP_NAME, settings.APP_ENV)
 
     # 1. Initialize and probe Redis connection
     redis_client = aioredis.from_url(
@@ -53,15 +58,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("Redis initial ping check warning: %s", exc)
 
-    # 2. Probe PostgreSQL and verify PostGIS extension
+    # 2. Initialize Embedded DuckDB Engine & Auto-Bootstrap on First Run
     try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1;"))
-            result = await conn.execute(text("SELECT PostGIS_Version();"))
-            postgis_ver = result.scalar()
-            logger.info("PostgreSQL connected successfully. PostGIS Version: %s", postgis_ver)
+        from database import get_duckdb
+        conn = get_duckdb()
+        struct_count = conn.execute("SELECT count(*) FROM india_master_structures;").fetchone()[0]
+        if struct_count == 0:
+            logger.info("Cold-start deployment detected: Auto-bootstrapping India national grid...")
+            from seed import build_india_database
+            build_india_database()
+            struct_count = conn.execute("SELECT count(*) FROM india_master_structures;").fetchone()[0]
+
+        anomalies_count = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
+        logger.info("DuckDB embedded engine active. Master structures: %d, Anomalies: %d", struct_count, anomalies_count)
     except Exception as exc:
-        logger.warning("PostgreSQL/PostGIS initial ping check warning: %s", exc)
+        logger.error("DuckDB initialization warning: %s", exc)
 
     logger.info("System startup sequence completed.")
 
@@ -78,11 +89,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Automated polling worker stopped.")
 
     if hasattr(app.state, "redis") and app.state.redis:
-        await app.state.redis.aclose()
-        logger.info("Redis connection pool closed.")
-
-    await engine.dispose()
-    logger.info("SQLAlchemy database connection engine disposed.")
+        try:
+            await app.state.redis.aclose()
+            logger.info("Redis connection pool closed.")
+        except Exception:
+            pass
 
 
 app = FastAPI(
@@ -115,7 +126,7 @@ api_v1_router = APIRouter(prefix=settings.API_V1_STR)
     response_model=SystemHealthResponse,
     status_code=status.HTTP_200_OK,
     summary="System Health & Infrastructure Diagnostics",
-    description="Probes PostgreSQL, PostGIS extension, and Redis cache with active latency measurement.",
+    description="Probes embedded DuckDB storage engine and Redis cache with active latency measurement.",
 )
 async def health_check() -> JSONResponse:
     """Active diagnostic probe evaluating infrastructure components."""
@@ -123,22 +134,26 @@ async def health_check() -> JSONResponse:
     db_status: Dict[str, Any] = {"status": "unhealthy", "latency_ms": None}
     redis_status: Dict[str, Any] = {"status": "unhealthy", "latency_ms": None}
 
-    # 1. Probe Database & PostGIS
+    # 1. Probe Embedded DuckDB Engine
     db_start = time.perf_counter()
     try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1;"))
-            postgis_result = await conn.execute(text("SELECT PostGIS_Version();"))
-            postgis_version = postgis_result.scalar()
-            db_latency = round((time.perf_counter() - db_start) * 1000, 2)
-            db_status = {
-                "status": "connected",
-                "latency_ms": db_latency,
-                "postgis_version": postgis_version,
-            }
+        from database import get_duckdb
+        conn = get_duckdb()
+        conn.execute("SELECT 1;").fetchone()
+        master_count = conn.execute("SELECT count(*) FROM india_master_structures;").fetchone()[0]
+        anomalies_count = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
+        db_latency = round((time.perf_counter() - db_start) * 1000, 2)
+        db_status = {
+            "status": "connected",
+            "engine": "duckdb",
+            "latency_ms": db_latency,
+            "master_structures": master_count,
+            "thermal_anomalies": anomalies_count,
+        }
     except Exception as exc:
         db_status = {
             "status": "error",
+            "engine": "duckdb",
             "error": str(exc),
             "latency_ms": round((time.perf_counter() - db_start) * 1000, 2),
         }
@@ -233,6 +248,39 @@ async def trigger_pipeline(
         )
 
 
+@api_v1_router.post(
+    "/admin/bootstrap",
+    status_code=status.HTTP_200_OK,
+    summary="Bootstrap / Re-populate DuckDB National Structures",
+    description="Synthesizes India's 541,180 H3 hexagonal cells and embeds the 17 strategic industrial facilities in DuckDB.",
+)
+async def admin_bootstrap(
+    force: bool = False,
+    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key"),
+) -> Dict[str, Any]:
+    """Manually or cloud-triggered database population routine (Protected)."""
+    provided_key = x_admin_key
+    if not provided_key or provided_key != settings.ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Valid X-Admin-Key header or admin_key parameter required to trigger database bootstrap.",
+        )
+
+    from seed import build_india_database
+    try:
+        total = build_india_database(force_grid=force)
+        return {
+            "status": "success",
+            "message": f"Successfully initialized {total:,} India national grid structures in DuckDB.",
+            "total_structures": total,
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database bootstrap failed: {str(exc)}",
+        )
+
+
 @api_v1_router.get(
     "/incidents",
     summary="List Thermal Incidents",
@@ -242,38 +290,55 @@ async def list_incidents(
     limit: int = 50,
     classification: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Retrieve recent satellite thermal incidents from TimescaleDB."""
-    from database import ThermalIncident, async_session_factory
-    from sqlalchemy import select, desc
+    """Retrieve recent satellite thermal incidents from DuckDB."""
+    from database import get_duckdb
+    import json
+    conn = get_duckdb()
+    params = []
+    where_sql = ""
+    if classification:
+        where_sql = "WHERE classification = ?"
+        params.append(classification)
+    params.append(limit)
 
-    async with async_session_factory() as session:
-        query = select(ThermalIncident).order_by(desc(ThermalIncident.detected_at)).limit(limit)
-        if classification:
-            query = query.filter(ThermalIncident.classification == classification)
-        result = await session.execute(query)
-        incidents = result.scalars().all()
-        return {
-            "total": len(incidents),
-            "items": [
-                {
-                    "id": str(inc.id),
-                    "detected_at": inc.detected_at.isoformat(),
-                    "latitude": inc.latitude,
-                    "longitude": inc.longitude,
-                    "h3_index": inc.h3_index,
-                    "brightness": inc.brightness,
-                    "frp": inc.frp,
-                    "satellite": inc.satellite,
-                    "confidence": inc.confidence,
-                    "classification": inc.classification,
-                    "classification_confidence": inc.classification_confidence,
-                    "is_industrial": inc.is_industrial,
-                    "pipeline_stage": (inc.raw_metadata or {}).get("pipeline_stage"),
-                    "shap_attribution": (inc.raw_metadata or {}).get("shap_attribution"),
-                }
-                for inc in incidents
-            ],
-        }
+    rows = conn.execute(f"""
+        SELECT id, detected_at, latitude, longitude, h3_cell,
+               brightness_mir, frp, satellite, confidence, classification,
+               classification_confidence, is_industrial, raw_metadata
+        FROM thermal_anomalies
+        {where_sql}
+        ORDER BY detected_at DESC
+        LIMIT ?;
+    """, params).fetchall()
+
+    items = []
+    for r in rows:
+        raw_meta = json.loads(r[12]) if isinstance(r[12], str) else (r[12] or {})
+        h3_hex = hex(r[4])[2:] if r[4] else ""
+        conf_val = float(r[10]) / 100.0 if r[10] > 1 else float(r[10] or 0.0)
+
+        items.append({
+            "id": str(r[0]),
+            "detected_at": r[1].isoformat() if hasattr(r[1], "isoformat") else str(r[1]),
+            "latitude": r[2],
+            "longitude": r[3],
+            "h3_index": h3_hex,
+            "brightness": float(r[5] or 0),
+            "frp": float(r[6] or 0),
+            "satellite": str(r[7]),
+            "confidence": str(r[8]),
+            "classification": str(r[9]),
+            "classification_confidence": conf_val,
+            "is_industrial": bool(r[11]),
+            "emitter_name": raw_meta.get("emitter_name"),
+            "pipeline_stage": raw_meta.get("pipeline_stage"),
+            "shap_attribution": raw_meta.get("shap_attribution"),
+        })
+
+    return {
+        "total": len(items),
+        "items": items,
+    }
 
 
 @api_v1_router.get(
@@ -286,35 +351,34 @@ async def list_reviews(
     limit: int = 50,
 ) -> Dict[str, Any]:
     """Retrieves items from the HITL review queue."""
-    from database import ReviewQueue, async_session_factory
-    from sqlalchemy import select, desc
+    from database import get_duckdb
+    conn = get_duckdb()
+    rows = conn.execute("""
+        SELECT id, incident_id, incident_detected_at, status, priority,
+               ai_classification, ai_confidence, reviewer_notes, created_at
+        FROM review_queue
+        WHERE status = ?
+        ORDER BY created_at DESC
+        LIMIT ?;
+    """, [status_filter, limit]).fetchall()
 
-    async with async_session_factory() as session:
-        query = (
-            select(ReviewQueue)
-            .filter(ReviewQueue.status == status_filter)
-            .order_by(desc(ReviewQueue.created_at))
-            .limit(limit)
-        )
-        result = await session.execute(query)
-        reviews = result.scalars().all()
-        return {
-            "total": len(reviews),
-            "items": [
-                {
-                    "id": str(rev.id),
-                    "incident_id": str(rev.incident_id),
-                    "incident_detected_at": rev.incident_detected_at.isoformat(),
-                    "status": rev.status,
-                    "priority": rev.priority,
-                    "ai_classification": rev.ai_classification,
-                    "ai_confidence": rev.ai_confidence,
-                    "reviewer_notes": rev.reviewer_notes,
-                    "created_at": rev.created_at.isoformat(),
-                }
-                for rev in reviews
-            ],
-        }
+    return {
+        "total": len(rows),
+        "items": [
+            {
+                "id": str(r[0]),
+                "incident_id": str(r[1]),
+                "incident_detected_at": r[2].isoformat() if hasattr(r[2], "isoformat") else str(r[2]),
+                "status": str(r[3]),
+                "priority": str(r[4]),
+                "ai_classification": str(r[5]),
+                "ai_confidence": float(r[6] or 0.0),
+                "reviewer_notes": str(r[7] or ""),
+                "created_at": r[8].isoformat() if hasattr(r[8], "isoformat") else str(r[8]),
+            }
+            for r in rows
+        ],
+    }
 
 
 # ------------------------------------------------------------------------------
@@ -390,60 +454,77 @@ async def get_gis_feature_collection(
     classification: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generates standard RFC 7946 GeoJSON FeatureCollection."""
-    from database import ThermalIncident, async_session_factory
-    from sqlalchemy import select, desc
+    from database import get_duckdb
+    import json
+    conn = get_duckdb()
 
-    async with async_session_factory() as session:
-        query = select(ThermalIncident).order_by(desc(ThermalIncident.detected_at)).limit(limit)
-        if is_industrial is not None:
-            query = query.filter(ThermalIncident.is_industrial == is_industrial)
-        if classification:
-            query = query.filter(ThermalIncident.classification == classification)
+    clauses = []
+    params = []
+    if is_industrial is not None:
+        clauses.append("is_industrial = ?")
+        params.append(is_industrial)
+    if classification:
+        clauses.append("classification = ?")
+        params.append(classification)
 
-        result = await session.execute(query)
-        incidents = result.scalars().all()
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
 
-        features = []
-        for inc in incidents:
-            meta = inc.raw_metadata or {}
-            color = COLOR_MAP.get(inc.classification, "#6C757D")
+    rows = conn.execute(f"""
+        SELECT id, h3_cell, detected_at, latitude, longitude,
+               brightness_mir, frp, satellite, confidence, classification,
+               classification_confidence, is_industrial, emitter_id,
+               distance_to_emitter_meters, raw_metadata
+        FROM thermal_anomalies
+        {where_sql}
+        ORDER BY detected_at DESC
+        LIMIT ?;
+    """, params).fetchall()
 
-            # Point geometry per RFC 7946 [longitude, latitude]
-            feature = {
-                "type": "Feature",
-                "id": str(inc.id),
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [inc.longitude, inc.latitude],
-                },
-                "properties": {
-                    "detected_at": inc.detected_at.isoformat(),
-                    "classification": inc.classification,
-                    "classification_confidence": inc.classification_confidence,
-                    "is_industrial": inc.is_industrial,
-                    "frp_mw": inc.frp,
-                    "brightness_k": inc.brightness,
-                    "satellite": inc.satellite,
-                    "h3_index": inc.h3_index,
-                    "marker_color": color,
-                    "emitter_id": str(inc.emitter_id) if inc.emitter_id else None,
-                    "distance_to_emitter_meters": inc.distance_to_emitter_meters,
-                    "shap_attribution": meta.get("shap_attribution"),
-                    "verification": meta.get("layer_5_verification"),
-                    "footprint_polygon": meta.get("footprint_geojson"),
-                },
-            }
-            features.append(feature)
+    features = []
+    for r in rows:
+        raw_meta = json.loads(r[14]) if isinstance(r[14], str) else (r[14] or {})
+        c_type = str(r[9])
+        color = COLOR_MAP.get(c_type, "#6C757D")
+        h3_hex = hex(r[1])[2:] if r[1] else ""
+        conf_val = float(r[10]) / 100.0 if r[10] > 1 else float(r[10] or 0.0)
 
-        return {
-            "type": "FeatureCollection",
-            "name": "GeoAI_Thermal_Anomalies",
-            "crs": {
-                "type": "name",
-                "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"},
+        features.append({
+            "type": "Feature",
+            "id": str(r[0]),
+            "geometry": {
+                "type": "Point",
+                "coordinates": [r[4], r[3]],  # [lon, lat] per RFC 7946
             },
-            "features": features,
-        }
+            "properties": {
+                "detected_at": r[2].isoformat() if hasattr(r[2], "isoformat") else str(r[2]),
+                "classification": c_type,
+                "classification_confidence": conf_val,
+                "is_industrial": bool(r[11]),
+                "frp_mw": float(r[6] or 0.0),
+                "brightness_k": float(r[5] or 0.0),
+                "satellite": str(r[7]),
+                "h3_index": h3_hex,
+                "marker_color": color,
+                "emitter_id": str(r[12]) if r[12] else None,
+                "emitter_name": raw_meta.get("emitter_name"),
+                "distance_to_emitter_meters": float(r[13]) if r[13] is not None else None,
+                "shap_attribution": raw_meta.get("shap_attribution"),
+                "verification": raw_meta.get("layer_5_verification"),
+                "footprint_polygon": raw_meta.get("footprint_geojson"),
+            },
+        })
+
+    return {
+        "type": "FeatureCollection",
+        "name": "GeoAI_Thermal_Anomalies",
+        "crs": {
+            "type": "name",
+            "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"},
+        },
+        "features": features,
+    }
+
 
 
 # Mount routers

@@ -1,24 +1,38 @@
-version: '3.8'
-
 services:
-  postgres_db:
-    image: timescale/timescaledb-ha:pg16
-    container_name: geoai_postgres
+  backend:
+    build:
+      context: ./Backend
+      dockerfile: Dockerfile
+    container_name: geoai_backend
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-geoai_db}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${PORT:-8000}:8000"
+    environment:
+      # Embedded DuckDB Vectorized Engine (Zero-Cost, In-Process)
+      DUCKDB_PATH: ${DUCKDB_PATH:-data/india_geoai.db}
+      # Redis Distributed Cache & Pub/Sub
+      REDIS_HOST: redis_cache
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis_cache:6379/0
+      # Application Configuration
+      APP_ENV: ${APP_ENV:-development}
+      DEBUG: ${DEBUG:-True}
+      FIRMS_MAP_KEY: ${FIRMS_MAP_KEY:-}
+      OPERATIONAL_BBOX: ${OPERATIONAL_BBOX:-68,6,97,36}
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:5173","http://127.0.0.1:5173"]'
     volumes:
-      - ./data/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
-      - postgres_data:/home/postgres/pgdata/data
+      - ./Backend:/app
+      - ./data:/app/data
+      - ./Backend/artifacts:/app/artifacts
+    depends_on:
+      redis_cache:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-geoai_db}"]
-      interval: 5s
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
     networks:
       - geoai_network
 
@@ -38,46 +52,9 @@ services:
     networks:
       - geoai_network
 
-  backend:
-    build:
-      context: ./Backend
-      dockerfile: Dockerfile
-    container_name: geoai_backend
-    restart: unless-stopped
-    ports:
-      - "${PORT:-8000}:8000"
-    environment:
-      POSTGRES_HOST: postgres_db
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-geoai_db}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres_db:5432/${POSTGRES_DB:-geoai_db}
-      REDIS_HOST: redis_cache
-      REDIS_PORT: 6379
-      REDIS_URL: redis://redis_cache:6379/0
-      APP_ENV: ${APP_ENV:-development}
-      DEBUG: ${DEBUG:-True}
-      FIRMS_MAP_KEY: ${FIRMS_MAP_KEY:-}
-      CORS_ORIGINS: '["http://localhost:3000","http://localhost:5173","http://127.0.0.1:5173"]'
-    depends_on:
-      postgres_db:
-        condition: service_healthy
-      redis_cache:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks:
-      - geoai_network
-
 networks:
   geoai_network:
     driver: bridge
 
 volumes:
-  postgres_data:
   redis_data:

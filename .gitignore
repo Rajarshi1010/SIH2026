@@ -41,6 +41,9 @@ Frontend/build/
 
 # Database Dumps & Local Runtimes
 *.sqlite3
+*.db
+*.db.wal
+*.parquet
 pgdata/
 data/dumps/
 data/raw/
@@ -51,6 +54,5 @@ data/raw/
 .DS_Store
 Thumbs.db
 Desktop.ini
+new_data_storage.pdf
 
-
-scripts/run_and_compare.py
