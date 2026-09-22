@@ -255,7 +255,7 @@ async def evaluate_ker_fastpath(
     """, neighbor_ints).fetchone()
 
     matched_site = None
-    if row and (row[1] is not None or row[3] == "Industry"):
+    if row and row[1] is not None:
         matched_site = {
             "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, str(row[0]))),
             "name": row[1] or "Industrial Facility",
