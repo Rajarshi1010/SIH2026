@@ -212,6 +212,6 @@ When a user clicks a fire pin on the map, render a popup or side drawer with the
   - `india_master_structures`: Baseline land-use and facility records (~700k features) indexed by 64-bit unsigned integer H3 keys (`UBIGINT`).
   - `thermal_anomalies`: Downcasted integer-compressed time-series of satellite thermal anomalies, updated continuously.
   - `review_queue`: Human-in-the-Loop triage queue for analyst verification.
-- **Legacy Fallback Option:** PostgreSQL 16 + PostGIS + TimescaleDB is fully supported via `STORAGE_ENGINE=postgres` in `.env`.
+- **Storage Engine Migration:** The platform has transitioned completely from PostgreSQL/PostGIS to embedded DuckDB (`data/india_geoai.db`). No separate database container or external PostgreSQL daemon is required.
 - **Frontend Impact:** **Zero.** All API contracts (`/api/v1/gis/features`, `/api/v1/incidents`, `/api/v1/reviews`, `/api/v1/ws/alerts`) remain 100% identical and RFC 7946 compliant. Coordinates, property keys, color mappings, and TreeSHAP vectors are unchanged.
 - **Refresh Cadence:** Background polling worker auto-fetches NASA FIRMS feeds every 15 minutes. Data is automatically preserved in `thermal_anomalies` for historical time-lapse analytics.

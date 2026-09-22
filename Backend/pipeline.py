@@ -223,16 +223,27 @@ async def evaluate_ker_fastpath(
     2. Executes geodesic distance query against known emitters/structures in DuckDB.
     3. If matched, calculates FRP Z-score.
     """
-    # Step 1: H3 neighborhood check
+    # Step 1: H3 neighborhood check (Master structures indexed at Resolution 7)
     incident_h3 = getattr(incident, "h3_index", None)
     if not incident_h3 or not (hasattr(h3, "is_valid_cell") and h3.is_valid_cell(str(incident_h3))):
         incident_h3 = h3.latlng_to_cell(
             incident.latitude, incident.longitude, settings.H3_RESOLUTION
         )
-    neighbors = list(h3.grid_disk(incident_h3, 1)) if hasattr(h3, "grid_disk") else [incident_h3]
+
+    res7_h3 = str(incident_h3)
+    try:
+        cur_res = h3.get_resolution(res7_h3) if hasattr(h3, "get_resolution") else 7
+        if cur_res > 7:
+            res7_h3 = h3.cell_to_parent(res7_h3, 7)
+        elif cur_res < 7:
+            res7_h3 = h3.latlng_to_cell(incident.latitude, incident.longitude, 7)
+    except Exception:
+        res7_h3 = h3.latlng_to_cell(incident.latitude, incident.longitude, 7)
+
+    neighbors = list(h3.grid_disk(res7_h3, 1)) if hasattr(h3, "grid_disk") else [res7_h3]
 
     conn = get_duckdb()
-    neighbor_ints = [int(h, 16) for h in neighbors]
+    neighbor_ints = list({int(h, 16) for h in neighbors})
     placeholders = ",".join(["?"] * len(neighbor_ints))
 
     # 1. Exact or k-ring 1 match in india_master_structures
@@ -479,107 +490,106 @@ class DeterministicPipeline:
         target_stage: str = "all",
     ) -> Dict[str, Any]:
         """
-        Processes incidents from DuckDB or TimescaleDB:
+        Processes incidents from DuckDB:
         - If target_stage == 'all' or 'unclassified': processes unclassified records through Layers 2, 3, & 4.
         - If target_stage == 'residuals': re-processes records currently tagged as RESIDUAL_CANDIDATE through Layer 4 ML.
         """
-        if settings.STORAGE_ENGINE == "duckdb":
-            from database import get_duckdb
-            import json
-            conn = get_duckdb()
+        from database import get_duckdb
+        import json
+        conn = get_duckdb()
 
-            filter_clause = (
-                "classification = 'RESIDUAL_CANDIDATE'"
-                if target_stage == "residuals"
-                else "classification IN ('unclassified', 'RESIDUAL_CANDIDATE')"
+        filter_clause = (
+            "classification = 'RESIDUAL_CANDIDATE'"
+            if target_stage == "residuals"
+            else "classification IN ('unclassified', 'RESIDUAL_CANDIDATE')"
+        )
+
+        rows = conn.execute(f"""
+            SELECT id, h3_cell, detected_at, latitude, longitude,
+                   brightness_mir, bright_t31, frp, satellite, confidence,
+                   classification, classification_confidence, is_industrial,
+                   emitter_id, distance_to_emitter_meters, raw_metadata
+            FROM thermal_anomalies
+            WHERE {filter_clause}
+            ORDER BY detected_at DESC
+            LIMIT ?;
+        """, [batch_limit]).fetchall()
+
+        if not rows:
+            return {
+                "processed_count": 0,
+                "message": "No incidents found matching processing criteria.",
+            }
+
+        processed = 0
+        stats: Dict[str, int] = {}
+
+        for row in rows:
+            raw_meta = json.loads(row[15]) if isinstance(row[15], str) else (row[15] or {})
+            raw_h3_hex = hex(row[1])[2:] if row[1] else ""
+            h3_hex = (
+                raw_h3_hex
+                if (raw_h3_hex and hasattr(h3, "is_valid_cell") and h3.is_valid_cell(raw_h3_hex))
+                else h3.latlng_to_cell(row[3], row[4], settings.H3_RESOLUTION)
             )
 
-            rows = conn.execute(f"""
-                SELECT id, h3_cell, detected_at, latitude, longitude,
-                       brightness_mir, bright_t31, frp, satellite, confidence,
-                       classification, classification_confidence, is_industrial,
-                       emitter_id, distance_to_emitter_meters, raw_metadata
-                FROM thermal_anomalies
-                WHERE {filter_clause}
-                ORDER BY detected_at DESC
-                LIMIT ?;
-            """, [batch_limit]).fetchall()
+            inc = IncidentAdapter(
+                id=row[0],
+                h3_cell=row[1],
+                h3_index=h3_hex,
+                detected_at=row[2],
+                latitude=row[3],
+                longitude=row[4],
+                brightness=float(row[5] or 300.0),
+                bright_t31=float(row[6]) if row[6] is not None else None,
+                frp=float(row[7] or 0.0),
+                satellite=str(row[8]),
+                confidence=str(row[9]),
+                daynight=raw_meta.get("daynight", "D"),
+                scan=raw_meta.get("scan", 0.375),
+                track=raw_meta.get("track", 0.375),
+                classification=str(row[10]),
+                classification_confidence=row[11],
+                is_industrial=bool(row[12]),
+                emitter_id=row[13],
+                distance_to_emitter_meters=row[14],
+                raw_metadata=raw_meta,
+            )
 
-            if not rows:
-                return {
-                    "processed_count": 0,
-                    "message": "No incidents found matching processing criteria.",
-                }
+            res = await self.process_incident(inc)
+            c_type = res["classification"]
+            stats[c_type] = stats.get(c_type, 0) + 1
+            processed += 1
 
-            processed = 0
-            stats: Dict[str, int] = {}
+            # Normalize confidence to UTINYINT (0-100)
+            conf_val = inc.classification_confidence
+            conf_int = int(round(conf_val * 100)) if isinstance(conf_val, float) else int(conf_val or 0)
 
-            for row in rows:
-                raw_meta = json.loads(row[15]) if isinstance(row[15], str) else (row[15] or {})
-                raw_h3_hex = hex(row[1])[2:] if row[1] else ""
-                h3_hex = (
-                    raw_h3_hex
-                    if (raw_h3_hex and hasattr(h3, "is_valid_cell") and h3.is_valid_cell(raw_h3_hex))
-                    else h3.latlng_to_cell(row[3], row[4], settings.H3_RESOLUTION)
-                )
+            conn.execute("""
+                UPDATE thermal_anomalies SET
+                    classification = ?::hazard_class,
+                    classification_confidence = ?,
+                    is_industrial = ?,
+                    emitter_id = ?,
+                    distance_to_emitter_meters = ?,
+                    raw_metadata = ?
+                WHERE id = ?;
+            """, [
+                inc.classification,
+                conf_int,
+                inc.is_industrial,
+                str(inc.emitter_id) if inc.emitter_id else None,
+                inc.distance_to_emitter_meters,
+                json.dumps(inc.raw_metadata),
+                str(inc.id),
+            ])
 
-                inc = IncidentAdapter(
-                    id=row[0],
-                    h3_cell=row[1],
-                    h3_index=h3_hex,
-                    detected_at=row[2],
-                    latitude=row[3],
-                    longitude=row[4],
-                    brightness=float(row[5] or 300.0),
-                    bright_t31=float(row[6]) if row[6] is not None else None,
-                    frp=float(row[7] or 0.0),
-                    satellite=str(row[8]),
-                    confidence=str(row[9]),
-                    daynight=raw_meta.get("daynight", "D"),
-                    scan=raw_meta.get("scan", 0.375),
-                    track=raw_meta.get("track", 0.375),
-                    classification=str(row[10]),
-                    classification_confidence=row[11],
-                    is_industrial=bool(row[12]),
-                    emitter_id=row[13],
-                    distance_to_emitter_meters=row[14],
-                    raw_metadata=raw_meta,
-                )
-
-                res = await self.process_incident(inc)
-                c_type = res["classification"]
-                stats[c_type] = stats.get(c_type, 0) + 1
-                processed += 1
-
-                # Normalize confidence to UTINYINT (0-100)
-                conf_val = inc.classification_confidence
-                conf_int = int(round(conf_val * 100)) if isinstance(conf_val, float) else int(conf_val or 0)
-
-                conn.execute("""
-                    UPDATE thermal_anomalies SET
-                        classification = ?::hazard_class,
-                        classification_confidence = ?,
-                        is_industrial = ?,
-                        emitter_id = ?,
-                        distance_to_emitter_meters = ?,
-                        raw_metadata = ?
-                    WHERE id = ?;
-                """, [
-                    inc.classification,
-                    conf_int,
-                    inc.is_industrial,
-                    str(inc.emitter_id) if inc.emitter_id else None,
-                    inc.distance_to_emitter_meters,
-                    json.dumps(inc.raw_metadata),
-                    str(inc.id),
-                ])
-
-            conn.execute("CHECKPOINT;")
-            return {
-                "status": "success",
-                "processed_count": processed,
-                "breakdown": stats,
-            }
+        conn.execute("CHECKPOINT;")
+        return {
+            "status": "success",
+            "processed_count": processed,
+            "breakdown": stats,
+        }
 
 
 # Global singleton instance

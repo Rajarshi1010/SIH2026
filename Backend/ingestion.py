@@ -250,20 +250,21 @@ class FirmsIngestionEngine:
 
         conn = get_duckdb()
         for item in records:
-            # Check for existing record to prevent duplicates
             h3_int = int(item["h3_index"], 16) if isinstance(item["h3_index"], str) else int(item["h3_index"])
+            sat_val = "VIIRS" if "VIIRS" in str(item["satellite"]).upper() else "MODIS"
+
+            # Check for existing record to prevent duplicates (accounting for satellite source)
             existing = conn.execute("""
                 SELECT id FROM thermal_anomalies
                 WHERE detected_at = ?
+                  AND satellite = ?::satellite_source
                   AND ABS(latitude - ?) < 0.0001
                   AND ABS(longitude - ?) < 0.0001
                 LIMIT 1;
-            """, [item["detected_at"], item["latitude"], item["longitude"]]).fetchone()
+            """, [item["detected_at"], sat_val, item["latitude"], item["longitude"]]).fetchone()
 
             if existing:
                 continue
-
-            sat_val = "VIIRS" if "VIIRS" in str(item["satellite"]).upper() else "MODIS"
 
             # Insert into DuckDB with primitive integer downcasting (~12-15 bytes)
             conn.execute("""

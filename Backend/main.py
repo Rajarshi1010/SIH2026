@@ -5,13 +5,21 @@ Configures FastAPI lifespan management, embedded DuckDB storage engine,
 Redis cache and pub/sub, CORS middleware, and production-grade monitoring endpoints.
 """
 
+import sys
+from pathlib import Path
+
+# Ensure backend directory is in sys.path regardless of execution root
+_backend_dir = Path(__file__).resolve().parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
-from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import redis.asyncio as aioredis
@@ -246,8 +254,19 @@ async def trigger_pipeline(
     summary="Bootstrap / Re-populate DuckDB National Structures",
     description="Synthesizes India's 541,180 H3 hexagonal cells and embeds the 17 strategic industrial facilities in DuckDB.",
 )
-async def admin_bootstrap(force: bool = False) -> Dict[str, Any]:
-    """Manually or cloud-triggered database population routine."""
+async def admin_bootstrap(
+    force: bool = False,
+    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key"),
+    admin_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Manually or cloud-triggered database population routine (Protected)."""
+    provided_key = x_admin_key or admin_key
+    if not provided_key or provided_key != settings.ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Valid X-Admin-Key header or admin_key parameter required to trigger database bootstrap.",
+        )
+
     from seed import build_india_database
     try:
         total = build_india_database(force_grid=force)
@@ -272,56 +291,55 @@ async def list_incidents(
     limit: int = 50,
     classification: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Retrieve recent satellite thermal incidents from DuckDB or TimescaleDB."""
-    if settings.STORAGE_ENGINE == "duckdb":
-        from database import get_duckdb
-        import json
-        conn = get_duckdb()
-        params = []
-        where_sql = ""
-        if classification:
-            where_sql = "WHERE classification = ?"
-            params.append(classification)
-        params.append(limit)
+    """Retrieve recent satellite thermal incidents from DuckDB."""
+    from database import get_duckdb
+    import json
+    conn = get_duckdb()
+    params = []
+    where_sql = ""
+    if classification:
+        where_sql = "WHERE classification = ?"
+        params.append(classification)
+    params.append(limit)
 
-        rows = conn.execute(f"""
-            SELECT id, detected_at, latitude, longitude, h3_cell,
-                   brightness_mir, frp, satellite, confidence, classification,
-                   classification_confidence, is_industrial, raw_metadata
-            FROM thermal_anomalies
-            {where_sql}
-            ORDER BY detected_at DESC
-            LIMIT ?;
-        """, params).fetchall()
+    rows = conn.execute(f"""
+        SELECT id, detected_at, latitude, longitude, h3_cell,
+               brightness_mir, frp, satellite, confidence, classification,
+               classification_confidence, is_industrial, raw_metadata
+        FROM thermal_anomalies
+        {where_sql}
+        ORDER BY detected_at DESC
+        LIMIT ?;
+    """, params).fetchall()
 
-        items = []
-        for r in rows:
-            raw_meta = json.loads(r[12]) if isinstance(r[12], str) else (r[12] or {})
-            h3_hex = hex(r[4])[2:] if r[4] else ""
-            conf_val = float(r[10]) / 100.0 if r[10] > 1 else float(r[10] or 0.0)
+    items = []
+    for r in rows:
+        raw_meta = json.loads(r[12]) if isinstance(r[12], str) else (r[12] or {})
+        h3_hex = hex(r[4])[2:] if r[4] else ""
+        conf_val = float(r[10]) / 100.0 if r[10] > 1 else float(r[10] or 0.0)
 
-            items.append({
-                "id": str(r[0]),
-                "detected_at": r[1].isoformat() if hasattr(r[1], "isoformat") else str(r[1]),
-                "latitude": r[2],
-                "longitude": r[3],
-                "h3_index": h3_hex,
-                "brightness": float(r[5] or 0),
-                "frp": float(r[6] or 0),
-                "satellite": str(r[7]),
-                "confidence": str(r[8]),
-                "classification": str(r[9]),
-                "classification_confidence": conf_val,
-                "is_industrial": bool(r[11]),
-                "emitter_name": raw_meta.get("emitter_name"),
-                "pipeline_stage": raw_meta.get("pipeline_stage"),
-                "shap_attribution": raw_meta.get("shap_attribution"),
-            })
+        items.append({
+            "id": str(r[0]),
+            "detected_at": r[1].isoformat() if hasattr(r[1], "isoformat") else str(r[1]),
+            "latitude": r[2],
+            "longitude": r[3],
+            "h3_index": h3_hex,
+            "brightness": float(r[5] or 0),
+            "frp": float(r[6] or 0),
+            "satellite": str(r[7]),
+            "confidence": str(r[8]),
+            "classification": str(r[9]),
+            "classification_confidence": conf_val,
+            "is_industrial": bool(r[11]),
+            "emitter_name": raw_meta.get("emitter_name"),
+            "pipeline_stage": raw_meta.get("pipeline_stage"),
+            "shap_attribution": raw_meta.get("shap_attribution"),
+        })
 
-        return {
-            "total": len(items),
-            "items": items,
-        }
+    return {
+        "total": len(items),
+        "items": items,
+    }
 
 
 @api_v1_router.get(
@@ -334,35 +352,34 @@ async def list_reviews(
     limit: int = 50,
 ) -> Dict[str, Any]:
     """Retrieves items from the HITL review queue."""
-    if settings.STORAGE_ENGINE == "duckdb":
-        from database import get_duckdb
-        conn = get_duckdb()
-        rows = conn.execute("""
-            SELECT id, incident_id, incident_detected_at, status, priority,
-                   ai_classification, ai_confidence, reviewer_notes, created_at
-            FROM review_queue
-            WHERE status = ?
-            ORDER BY created_at DESC
-            LIMIT ?;
-        """, [status_filter, limit]).fetchall()
+    from database import get_duckdb
+    conn = get_duckdb()
+    rows = conn.execute("""
+        SELECT id, incident_id, incident_detected_at, status, priority,
+               ai_classification, ai_confidence, reviewer_notes, created_at
+        FROM review_queue
+        WHERE status = ?
+        ORDER BY created_at DESC
+        LIMIT ?;
+    """, [status_filter, limit]).fetchall()
 
-        return {
-            "total": len(rows),
-            "items": [
-                {
-                    "id": str(r[0]),
-                    "incident_id": str(r[1]),
-                    "incident_detected_at": r[2].isoformat() if hasattr(r[2], "isoformat") else str(r[2]),
-                    "status": str(r[3]),
-                    "priority": str(r[4]),
-                    "ai_classification": str(r[5]),
-                    "ai_confidence": float(r[6] or 0.0),
-                    "reviewer_notes": str(r[7] or ""),
-                    "created_at": r[8].isoformat() if hasattr(r[8], "isoformat") else str(r[8]),
-                }
-                for r in rows
-            ],
-        }
+    return {
+        "total": len(rows),
+        "items": [
+            {
+                "id": str(r[0]),
+                "incident_id": str(r[1]),
+                "incident_detected_at": r[2].isoformat() if hasattr(r[2], "isoformat") else str(r[2]),
+                "status": str(r[3]),
+                "priority": str(r[4]),
+                "ai_classification": str(r[5]),
+                "ai_confidence": float(r[6] or 0.0),
+                "reviewer_notes": str(r[7] or ""),
+                "created_at": r[8].isoformat() if hasattr(r[8], "isoformat") else str(r[8]),
+            }
+            for r in rows
+        ],
+    }
 
 
 # ------------------------------------------------------------------------------
@@ -438,77 +455,76 @@ async def get_gis_feature_collection(
     classification: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generates standard RFC 7946 GeoJSON FeatureCollection."""
-    if settings.STORAGE_ENGINE == "duckdb":
-        from database import get_duckdb
-        import json
-        conn = get_duckdb()
+    from database import get_duckdb
+    import json
+    conn = get_duckdb()
 
-        clauses = []
-        params = []
-        if is_industrial is not None:
-            clauses.append("is_industrial = ?")
-            params.append(is_industrial)
-        if classification:
-            clauses.append("classification = ?")
-            params.append(classification)
+    clauses = []
+    params = []
+    if is_industrial is not None:
+        clauses.append("is_industrial = ?")
+        params.append(is_industrial)
+    if classification:
+        clauses.append("classification = ?")
+        params.append(classification)
 
-        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.append(limit)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
 
-        rows = conn.execute(f"""
-            SELECT id, h3_cell, detected_at, latitude, longitude,
-                   brightness_mir, frp, satellite, confidence, classification,
-                   classification_confidence, is_industrial, emitter_id,
-                   distance_to_emitter_meters, raw_metadata
-            FROM thermal_anomalies
-            {where_sql}
-            ORDER BY detected_at DESC
-            LIMIT ?;
-        """, params).fetchall()
+    rows = conn.execute(f"""
+        SELECT id, h3_cell, detected_at, latitude, longitude,
+               brightness_mir, frp, satellite, confidence, classification,
+               classification_confidence, is_industrial, emitter_id,
+               distance_to_emitter_meters, raw_metadata
+        FROM thermal_anomalies
+        {where_sql}
+        ORDER BY detected_at DESC
+        LIMIT ?;
+    """, params).fetchall()
 
-        features = []
-        for r in rows:
-            raw_meta = json.loads(r[14]) if isinstance(r[14], str) else (r[14] or {})
-            c_type = str(r[9])
-            color = COLOR_MAP.get(c_type, "#6C757D")
-            h3_hex = hex(r[1])[2:] if r[1] else ""
-            conf_val = float(r[10]) / 100.0 if r[10] > 1 else float(r[10] or 0.0)
+    features = []
+    for r in rows:
+        raw_meta = json.loads(r[14]) if isinstance(r[14], str) else (r[14] or {})
+        c_type = str(r[9])
+        color = COLOR_MAP.get(c_type, "#6C757D")
+        h3_hex = hex(r[1])[2:] if r[1] else ""
+        conf_val = float(r[10]) / 100.0 if r[10] > 1 else float(r[10] or 0.0)
 
-            features.append({
-                "type": "Feature",
-                "id": str(r[0]),
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [r[4], r[3]],  # [lon, lat] per RFC 7946
-                },
-                "properties": {
-                    "detected_at": r[2].isoformat() if hasattr(r[2], "isoformat") else str(r[2]),
-                    "classification": c_type,
-                    "classification_confidence": conf_val,
-                    "is_industrial": bool(r[11]),
-                    "frp_mw": float(r[6] or 0.0),
-                    "brightness_k": float(r[5] or 0.0),
-                    "satellite": str(r[7]),
-                    "h3_index": h3_hex,
-                    "marker_color": color,
-                    "emitter_id": str(r[12]) if r[12] else None,
-                    "emitter_name": raw_meta.get("emitter_name"),
-                    "distance_to_emitter_meters": float(r[13]) if r[13] is not None else None,
-                    "shap_attribution": raw_meta.get("shap_attribution"),
-                    "verification": raw_meta.get("layer_5_verification"),
-                    "footprint_polygon": raw_meta.get("footprint_geojson"),
-                },
-            })
-
-        return {
-            "type": "FeatureCollection",
-            "name": "GeoAI_Thermal_Anomalies",
-            "crs": {
-                "type": "name",
-                "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"},
+        features.append({
+            "type": "Feature",
+            "id": str(r[0]),
+            "geometry": {
+                "type": "Point",
+                "coordinates": [r[4], r[3]],  # [lon, lat] per RFC 7946
             },
-            "features": features,
-        }
+            "properties": {
+                "detected_at": r[2].isoformat() if hasattr(r[2], "isoformat") else str(r[2]),
+                "classification": c_type,
+                "classification_confidence": conf_val,
+                "is_industrial": bool(r[11]),
+                "frp_mw": float(r[6] or 0.0),
+                "brightness_k": float(r[5] or 0.0),
+                "satellite": str(r[7]),
+                "h3_index": h3_hex,
+                "marker_color": color,
+                "emitter_id": str(r[12]) if r[12] else None,
+                "emitter_name": raw_meta.get("emitter_name"),
+                "distance_to_emitter_meters": float(r[13]) if r[13] is not None else None,
+                "shap_attribution": raw_meta.get("shap_attribution"),
+                "verification": raw_meta.get("layer_5_verification"),
+                "footprint_polygon": raw_meta.get("footprint_geojson"),
+            },
+        })
+
+    return {
+        "type": "FeatureCollection",
+        "name": "GeoAI_Thermal_Anomalies",
+        "crs": {
+            "type": "name",
+            "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"},
+        },
+        "features": features,
+    }
 
 
 

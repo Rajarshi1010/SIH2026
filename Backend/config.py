@@ -7,7 +7,7 @@ strict validation, and fallback derivations for PostgreSQL, Redis, and Geospatia
 
 from functools import lru_cache
 import json
-from typing import List, Optional, Union
+from typing import List, Literal, Optional, Union
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+    ADMIN_API_KEY: str = "agnikavach_admin_secret_key"
 
     # --- Security & CORS ---
     SECRET_KEY: str = "insecure_dev_secret_key_please_override_in_production"
@@ -51,9 +52,19 @@ class Settings(BaseSettings):
             return [str(item).strip() for item in v]
         return []
 
-    # --- Storage Engine ---
-    STORAGE_ENGINE: str = "duckdb"
+    # --- Storage Engine (Pure DuckDB Vectorized In-Process) ---
+    STORAGE_ENGINE: Literal["duckdb"] = "duckdb"
     DUCKDB_PATH: str = "data/india_geoai.db"
+
+    @field_validator("STORAGE_ENGINE", mode="before")
+    @classmethod
+    def validate_storage_engine(cls, v: str) -> str:
+        if v and str(v).lower() != "duckdb":
+            raise ValueError(
+                f"Unsupported STORAGE_ENGINE '{v}'. The platform has migrated exclusively to the "
+                "embedded DuckDB engine ('duckdb'). PostgreSQL and TimescaleDB are deprecated and removed."
+            )
+        return "duckdb"
 
     # --- Redis Distributed Cache ---
     REDIS_HOST: str = "localhost"
@@ -75,7 +86,7 @@ class Settings(BaseSettings):
     DELTA_NBR_BURN_THRESHOLD: float = 0.27
 
     # --- Geospatial Parameters ---
-    H3_RESOLUTION: int = Field(default=8, ge=0, le=15)
+    H3_RESOLUTION: int = Field(default=7, ge=0, le=15)
     SPATIAL_SEARCH_RADIUS_KM: float = Field(default=5.0, gt=0.0)
     EMITTER_MATCH_BUFFER_METERS: float = Field(default=500.0, gt=0.0)
 

@@ -51,16 +51,16 @@ COPY --from=builder /opt/venv /opt/venv
 RUN groupadd -g 10001 appuser && \
     useradd -u 10001 -g appuser -s /bin/sh -d /app -M appuser
 
-# Pre-create data and artifacts directories with proper ownership and volume permissions
+# Pre-create data and artifacts directories with proper ownership and secure permissions
 RUN mkdir -p /app/data /app/artifacts && \
-    chmod -R 777 /app/data /app/artifacts && \
+    chmod -R 755 /app/data /app/artifacts && \
     chown -R appuser:appuser /app
 
 # Copy application source code
 COPY . /app
 
-# Grant permissions to non-root user
-RUN chmod -R 777 /app/data /app/artifacts && \
+# Grant secure permissions to non-root user
+RUN chmod -R 755 /app/data /app/artifacts && \
     chown -R appuser:appuser /app
 
 # Switch to non-root user
