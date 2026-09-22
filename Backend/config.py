@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    ADMIN_API_KEY: str = "agnikavach_admin_secret_key"
+    ADMIN_API_KEY: Optional[str] = None
 
     # --- Security & CORS ---
     SECRET_KEY: str = "insecure_dev_secret_key_please_override_in_production"
