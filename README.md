@@ -370,7 +370,8 @@ data/india_geoai.db
 3. **On-Demand Remote Population**:
    - You can trigger a full database regeneration or re-index on your cloud server anytime via:
      ```bash
-     curl -X POST "https://<your-backend-domain>/api/v1/admin/bootstrap?force=true"
+     curl -X POST "https://<your-backend-domain>/api/v1/admin/bootstrap?force=true" \
+       -H "X-Admin-Key: <your_admin_api_key>"
      ```
 
 ### Zero-Cost Stack Summary
