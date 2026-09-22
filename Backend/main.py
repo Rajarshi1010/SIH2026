@@ -257,10 +257,9 @@ async def trigger_pipeline(
 async def admin_bootstrap(
     force: bool = False,
     x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key"),
-    admin_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Manually or cloud-triggered database population routine (Protected)."""
-    provided_key = x_admin_key or admin_key
+    provided_key = x_admin_key
     if not provided_key or provided_key != settings.ADMIN_API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
