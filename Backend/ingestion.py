@@ -251,7 +251,7 @@ class FirmsIngestionEngine:
         conn = get_duckdb()
         for item in records:
             h3_int = int(item["h3_index"], 16) if isinstance(item["h3_index"], str) else int(item["h3_index"])
-            sat_val = "VIIRS" if "VIIRS" in str(item["satellite"]).upper() else "MODIS"
+            sat_val = "VIIRS" if "VIIRS" in str(item["instrument"]).upper() else "MODIS"
 
             # Check for existing record to prevent duplicates (accounting for satellite source)
             existing = conn.execute("""
