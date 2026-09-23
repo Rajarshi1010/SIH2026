@@ -1,10 +1,10 @@
 # ==============================================================================
-# Multi-Stage Dockerfile for GeoAI Industrial Fire Classifier Backend
-# Non-root execution with UID 10001 (appuser)
+# Multi-Stage Dockerfile for GeoAI Industrial Fire Classifier (Root Entrypoint)
+# Compatible with Hugging Face Spaces (Port 7860), Render (Port 10000), & Local (8000)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# Stage 1: Build Dependencies
+# Stage 1: Build Python Virtual Environment
 # ------------------------------------------------------------------------------
 FROM python:3.11-slim-bookworm AS builder
 
@@ -21,12 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY requirements.txt .
+COPY Backend/requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
 # ------------------------------------------------------------------------------
-# Stage 2: Production Runtime
+# Stage 2: Hardened Non-Root Production Runtime
 # ------------------------------------------------------------------------------
 FROM python:3.11-slim-bookworm AS runner
 
@@ -35,42 +35,39 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
-    PORT=8000 \
+    PORT=7860 \
     HOST=0.0.0.0
 
-# Install runtime dependencies (curl for healthchecks, libgomp1 for LightGBM OpenMP)
+# Install runtime utilities: curl for container healthcheck, libgomp1 for LightGBM OpenMP
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy pre-built virtual environment from builder stage
 COPY --from=builder /opt/venv /opt/venv
 
-# Create dedicated non-root application group and user (UID/GID 10001)
+# Create dedicated non-root application user (UID/GID 10001)
 RUN groupadd -g 10001 appuser && \
     useradd -u 10001 -g appuser -s /bin/sh -d /app -M appuser
 
-# Pre-create data and artifacts directories with proper ownership and secure permissions
+# Pre-create data and artifacts directories with secure 755 permissions
 RUN mkdir -p /app/data /app/artifacts && \
     chmod -R 755 /app/data /app/artifacts && \
     chown -R appuser:appuser /app
 
-# Copy application source code
-COPY . /app
+# Copy Backend codebase into container /app
+COPY Backend/ /app/
 
-# Grant secure permissions to non-root user
+# Enforce secure ownership and permissions
 RUN chmod -R 755 /app/data /app/artifacts && \
     chown -R appuser:appuser /app
 
-# Switch to non-root user
 USER 10001
 
-EXPOSE 8000
+EXPOSE 7860
 
-# Docker-level health check verification
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+# Health check dynamically verifies whichever port is assigned ($PORT or default 7860)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD sh -c "curl -f http://localhost:\${PORT:-7860}/api/v1/health || exit 1"
 
-# Launch production ASGI server (Single worker for zero-cost embedded DuckDB in-process concurrency)
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-7860} --workers 1"]
