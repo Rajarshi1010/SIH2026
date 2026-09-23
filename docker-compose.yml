@@ -18,7 +18,7 @@ services:
       APP_ENV: ${APP_ENV:-development}
       DEBUG: ${DEBUG:-True}
       FIRMS_MAP_KEY: ${FIRMS_MAP_KEY:-}
-      OPERATIONAL_BBOX: ${OPERATIONAL_BBOX:-68,6,97,36}
+      OPERATIONAL_BBOX: ${OPERATIONAL_BBOX:-68,6,98,38}
       CORS_ORIGINS: '["http://localhost:3000","http://localhost:5173","http://127.0.0.1:5173"]'
     volumes:
       - ./Backend:/app

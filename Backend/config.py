@@ -77,8 +77,8 @@ class Settings(BaseSettings):
     FIRMS_MAP_KEY: Optional[str] = "cc1453ca7f4aee96699a0c8d4a63b205"
     FIRMS_API_URL: str = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
     # Strategic Operational Bounding Box [min_lon, min_lat, max_lon, max_lat]
-    # Default covers India: 68.0, 6.0, 97.0, 36.0
-    OPERATIONAL_BBOX: str = "68,6,97,36"
+    # Encompasses the entire Indian territory (West: Gujarat 68E, South: Great Nicobar 6N, East: Arunachal 98E, North: Ladakh 38N)
+    OPERATIONAL_BBOX: str = "68,6,98,38"
 
     # --- Layer 5: STAC API & Optical Verification (Sentinel-2) ---
     STAC_API_URL: str = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
