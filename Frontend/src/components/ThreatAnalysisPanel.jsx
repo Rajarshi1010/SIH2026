@@ -1,6 +1,4 @@
 import React from 'react';
-import { historyFor, impactRadiusKm, populationAtRisk } from '../threatMetrics';
-import HistoryChart from './HistoryChart';
 import ShapChart from './ShapChart';
 
 const Readout = ({ label, value, mono = true }) => (
@@ -15,10 +13,6 @@ const Readout = ({ label, value, mono = true }) => (
 );
 
 export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNotify }) {
-  const history = historyFor(point, 6);
-  const radiusKm = impactRadiusKm(point);
-  const population = populationAtRisk(point);
-
   const detected = point.detected_at ? new Date(point.detected_at) : null;
   const detectedLabel =
     detected && !Number.isNaN(detected.getTime())
@@ -66,7 +60,7 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
 
       <div className="flex-1 overflow-y-auto px-5 py-4">
         {/* Physical measurements straight off the feed */}
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <div className="rounded-md border border-border-soft px-3 py-2.5">
             <div className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
               Radiative power
@@ -84,16 +78,6 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
             <div className="mt-1 font-mono text-[28px] leading-none tabular-nums text-text-primary">
               {point.brightness_k ?? '--'}
               <span className="ml-1 text-[13px] text-text-muted">K</span>
-            </div>
-          </div>
-
-          <div className="rounded-md border border-border-soft px-3 py-2.5">
-            <div className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
-              Impact radius
-            </div>
-            <div className="mt-1 font-mono text-[28px] leading-none tabular-nums text-text-primary">
-              {radiusKm}
-              <span className="ml-1 text-[13px] text-text-muted">km</span>
             </div>
           </div>
         </div>
@@ -129,25 +113,6 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
             <ShapChart shap={point.shap} />
           </div>
         </div>
-
-        {/* Detection history (placeholder series — no history endpoint yet) */}
-        <div className="mt-6 border-t border-border-soft pt-4">
-          <div className="flex items-baseline justify-between">
-            <h4 className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
-              Detection history
-            </h4>
-            <span className="font-mono text-[12px] tabular-nums text-text-muted">
-              {history.length} passes
-            </span>
-          </div>
-          <div className="mt-3">
-            <HistoryChart history={history} color={point.color} />
-          </div>
-          <p className="mt-2 font-sans text-[12px] leading-relaxed text-text-muted">
-            Placeholder series. The API exposes no per-location history endpoint yet.
-            Impact radius and exposure are likewise estimates, not model output.
-          </p>
-        </div>
       </div>
 
       {/* Notify action */}
@@ -158,8 +123,7 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
               Alert queued
             </div>
             <div className="mt-1 font-sans text-[12.5px] leading-relaxed text-text-muted">
-              Queued for responders within {radiusKm} km ({(population / 1000).toFixed(1)}k exposed).
-              Dispatch is not wired to a backend yet.
+              Queued for responders near this detection. Dispatch is not wired to a backend yet.
             </div>
           </div>
         ) : (
@@ -168,7 +132,7 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
             onClick={onNotify}
             className="w-full rounded-md border border-accent bg-accent px-4 py-3 font-sans text-[13px] font-bold uppercase tracking-[0.15em] text-on-accent transition-colors hover:border-accent-hover hover:bg-accent-hover"
           >
-            Notify area · {radiusKm} km
+            Notify area
           </button>
         )}
       </div>

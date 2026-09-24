@@ -1,8 +1,6 @@
 import React, { useEffect } from 'react';
-import { MapContainer, TileLayer, CircleMarker, Circle, Polygon, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, CircleMarker, Polygon, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
-import { historyFor, impactRadiusKm } from '../threatMetrics';
-import HistoryChart from './HistoryChart';
 
 const DEFAULT_CENTER = [20.5937, 78.9629];
 
@@ -39,20 +37,6 @@ export default function LeafletMapSection({ points, onMarkerClick, selectedPoint
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        {impactPoint && (
-          <Circle
-            center={[impactPoint.lat, impactPoint.lng]}
-            radius={impactRadiusKm(impactPoint) * 1000}
-            pathOptions={{
-              color: impactPoint.color,
-              fillColor: impactPoint.color,
-              weight: 1,
-              dashArray: '4 4',
-              fillOpacity: 0.08,
-            }}
-          />
-        )}
-
         {/* DEFM sensor swath for the point under analysis */}
         {impactFootprint && (
           <Polygon
@@ -68,7 +52,6 @@ export default function LeafletMapSection({ points, onMarkerClick, selectedPoint
 
         {points && points.map((pt, idx) => {
           const isSelected = selectedPoint && selectedPoint.id === pt.id;
-          const recent = historyFor(pt, 6);
 
           return (
             <CircleMarker
@@ -132,19 +115,6 @@ export default function LeafletMapSection({ points, onMarkerClick, selectedPoint
                       H3 cell
                     </div>
                     <div className="font-mono text-[12.5px] text-text-secondary">{pt.h3_index || '--'}</div>
-                  </div>
-
-                  <div className="mt-3 border-t border-border-soft pt-2.5">
-                    <div className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
-                      Recent passes
-                    </div>
-                    <div className="mt-1.5">
-                      <HistoryChart history={recent} color={pt.color} compact />
-                    </div>
-                    <div className="mt-1 flex justify-between font-mono text-[11.5px] tabular-nums text-text-muted">
-                      <span>{recent[recent.length - 1].date}</span>
-                      <span>{recent[0].date}</span>
-                    </div>
                   </div>
 
                   <button

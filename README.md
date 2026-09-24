@@ -342,7 +342,6 @@ To enable real-time WebSockets and cross-worker caching on serverless cloud:
 3. Add Environment Variables:
    ```env
    VITE_API_BASE_URL = https://<your-hf-or-render-domain>/api/v1
-   VITE_WS_ALERTS_URL = wss://<your-hf-or-render-domain>/api/v1/ws/alerts
    ```
 4. Click **Deploy**. Your GIS dashboard will be live within 30 seconds with automated CI/CD on every git commit.
 
