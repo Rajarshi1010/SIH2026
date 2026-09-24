@@ -84,7 +84,7 @@ async def verify_incident_burn_scar(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.post(settings.STAC_API_URL, json=search_payload)
             if resp.status_code == 200:
                 data = resp.json()

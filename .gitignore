@@ -21,7 +21,8 @@ env/
 
 
 # ML Model Artifacts & Checkpoints
-Backend/artifacts/
+Backend/artifacts/*
+!Backend/artifacts/residual_lgb_model.txt
 *.lgb
 *.onnx
 

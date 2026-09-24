@@ -36,7 +36,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
     PORT=7860 \
-    HOST=0.0.0.0
+    HOST=0.0.0.0 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1
 
 # Install runtime utilities: curl for container healthcheck, libgomp1 for LightGBM OpenMP
 RUN apt-get update && apt-get install -y --no-install-recommends \

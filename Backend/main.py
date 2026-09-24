@@ -116,6 +116,27 @@ app.add_middleware(
 )
 
 # ------------------------------------------------------------------------------
+# Root & Health Probes (Supports Render, Cloudflare, UptimeRobot HEAD & GET checks)
+# ------------------------------------------------------------------------------
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+async def root_ping():
+    """Immediate 200 OK for platform health checks (Render, AWS, GCP)."""
+    return {
+        "status": "healthy",
+        "service": settings.APP_NAME,
+        "version": "1.0.0",
+        "health": f"{settings.API_V1_STR}/health",
+        "docs": "/docs",
+    }
+
+
+@app.api_route("/health", methods=["GET", "HEAD"], include_in_schema=False)
+async def root_health_alias():
+    """Root /health alias returning immediate 200 OK."""
+    return {"status": "healthy"}
+
+
+# ------------------------------------------------------------------------------
 # API V1 Router
 # ------------------------------------------------------------------------------
 api_v1_router = APIRouter(prefix=settings.API_V1_STR)

@@ -91,6 +91,13 @@ class TelemetryPollingWorker:
         """Internal continuous loop with error resilience and backoff."""
         self.is_running = True
         logger.info(f"Automated Polling Worker started (cadence: {self.interval_seconds}s).")
+        # Allow server to complete initial platform health checks before heavy telemetry cycle
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            self.is_running = False
+            return
+
         while self.is_running:
             try:
                 await self.execute_cycle()

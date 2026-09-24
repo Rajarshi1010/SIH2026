@@ -257,9 +257,11 @@ class ResidualClassifier:
             "min_data_in_leaf": 15,
             "verbosity": -1,
             "seed": 42,
+            "num_threads": 1,
+            "n_jobs": 1,
         }
 
-        self.model = lgb.train(params, train_data, num_boost_round=80)
+        self.model = lgb.train(params, train_data, num_boost_round=40)
         self.model.save_model(str(MODEL_PATH))
         logger.info(f"LightGBM classifier trained and persisted to {MODEL_PATH}")
 
