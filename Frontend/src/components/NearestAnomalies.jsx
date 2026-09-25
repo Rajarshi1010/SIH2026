@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { CLASSIFICATIONS } from '../classifications';
 
 const formatDistance = (km) => {
@@ -18,8 +18,9 @@ const Row = ({ label, value }) => (
   </div>
 );
 
-// Selection is owned by App so the numbered globe badges and these cards stay in sync.
-export default function NearestAnomalies({ points, expandedId, onToggle }) {
+export default function NearestAnomalies({ points }) {
+  const [expandedId, setExpandedId] = useState(null);
+
   if (!points || points.length === 0) return null;
   const list = points.slice(0, 5);
 
@@ -39,24 +40,21 @@ export default function NearestAnomalies({ points, expandedId, onToggle }) {
       {list.map((pt, index) => {
         const meta = CLASSIFICATIONS[pt.classification] || CLASSIFICATIONS.unclassified;
         const isOpen = expandedId === pt.id;
+        const highScore = pt.confidence != null && pt.confidence >= 0.75;
 
         return (
           <div
             key={pt.id}
-            onClick={() => onToggle && onToggle(pt.id)}
-            className={`fade-up cursor-pointer rounded-lg border bg-card px-4 py-3.5 ${isOpen ? 'border-border-strong' : 'border-border-soft'}`}
+            onClick={() => setExpandedId(isOpen ? null : pt.id)}
+            className="fade-up cursor-pointer rounded-lg border border-border-soft bg-card px-4 py-3.5"
             style={{ animationDelay: `${index * 60}ms` }}
           >
             <div className="flex items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-2.5">
-                {/* Same numbered badge as the marker on the globe */}
                 <span
-                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 bg-card font-mono text-[12px] font-bold text-text-primary"
-                  style={{ borderColor: meta.color }}
-                  aria-hidden="true"
-                >
-                  {index + 1}
-                </span>
+                  className={`h-2.5 w-2.5 shrink-0 rounded-full${highScore ? ' pulse-dot' : ''}`}
+                  style={{ backgroundColor: meta.color, color: meta.color }}
+                />
                 <span className="truncate text-[15px] font-medium text-text-primary">
                   {meta.label}
                 </span>

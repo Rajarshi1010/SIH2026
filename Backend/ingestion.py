@@ -16,7 +16,7 @@ import csv
 import io
 import logging
 import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
@@ -170,19 +170,6 @@ def parse_firms_csv_stream(csv_text: str) -> List[Dict[str, Any]]:
     return incidents
 
 
-# Stored history for today and yesterday (UTC) is refetched after this long,
-# since FIRMS can still add late satellite passes to those days.
-HISTORY_RECENT_TTL = timedelta(minutes=15)
-
-
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in kilometres."""
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp, dl = p2 - p1, math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 6371.0 * 2 * math.asin(math.sqrt(a))
-
-
 # ------------------------------------------------------------------------------
 # 3. Asynchronous FIRMS Ingestion Engine
 # ------------------------------------------------------------------------------
@@ -206,20 +193,15 @@ class FirmsIngestionEngine:
         self,
         source: str = "VIIRS_SNPP_NRT",
         day_range: int = 1,
-        bbox: Optional[str] = None,
-        start_date: Optional[str] = None,
     ) -> str:
         """
         Asynchronously fetches FIRMS CSV telemetry stream.
-        URL pattern: {FIRMS_API_URL}/{MAP_KEY}/{SOURCE}/{BBOX}/{DAY_RANGE}[/{START_DATE}]
-        FIRMS accepts DAY_RANGE 1..5; START_DATE (YYYY-MM-DD) shifts the window back in time.
+        URL pattern: {FIRMS_API_URL}/{MAP_KEY}/{SOURCE}/{BBOX}/{DAY_RANGE}
         """
         if not self.map_key or "your_nasa_firms" in self.map_key:
             raise ValueError("NASA FIRMS Map Key is not configured.")
 
-        url = f"{self.api_base}/{self.map_key}/{source}/{bbox or self.operational_bbox}/{day_range}"
-        if start_date:
-            url = f"{url}/{start_date}"
+        url = f"{self.api_base}/{self.map_key}/{source}/{self.operational_bbox}/{day_range}"
         masked_url = url.replace(self.map_key, "KEY_PROTECTED")
         logger.info(f"Connecting to NASA FIRMS stream: {masked_url}")
 
@@ -233,134 +215,6 @@ class FirmsIngestionEngine:
                 raise RuntimeError("FIRMS API rate limit exceeded (HTTP 429).")
             resp.raise_for_status()
             return resp.text
-
-    async def _fetch_firms_daily(
-        self,
-        lat: float,
-        lon: float,
-        first_day: date,
-        last_day: date,
-        radius_km: float,
-        source: str,
-    ) -> Dict[date, Dict[str, float]]:
-        """
-        Daily detection counts and FRP within `radius_km` of a point from NASA FIRMS,
-        for every day in [first_day, last_day]. The range is split into 5-day requests
-        (the FIRMS maximum) fetched in parallel. Days without detections come back as zeros.
-        """
-        dlat = radius_km / 111.32
-        dlon = radius_km / (111.32 * max(math.cos(math.radians(lat)), 0.01))
-        bbox = f"{lon - dlon:.4f},{lat - dlat:.4f},{lon + dlon:.4f},{lat + dlat:.4f}"
-
-        chunks = []
-        cursor = first_day
-        while cursor <= last_day:
-            span = min(5, (last_day - cursor).days + 1)
-            chunks.append((cursor, span))
-            cursor += timedelta(days=span)
-
-        csv_texts = await asyncio.gather(*(
-            self.fetch_telemetry(source=source, day_range=span, bbox=bbox, start_date=start.isoformat())
-            for start, span in chunks
-        ))
-
-        per_day = {
-            first_day + timedelta(days=i): {"detections": 0, "max_frp_mw": 0.0, "total_frp_mw": 0.0}
-            for i in range((last_day - first_day).days + 1)
-        }
-        for text in csv_texts:
-            for row in csv.DictReader(io.StringIO(text)):
-                try:
-                    r_lat, r_lon = float(row["latitude"]), float(row["longitude"])
-                    frp = max(float(row.get("frp") or 0.0), 0.0)
-                    day = per_day.get(date.fromisoformat(row["acq_date"]))
-                except (KeyError, ValueError):
-                    continue
-                if day is None or _haversine_km(lat, lon, r_lat, r_lon) > radius_km:
-                    continue
-                day["detections"] += 1
-                day["max_frp_mw"] = max(day["max_frp_mw"], frp)
-                day["total_frp_mw"] += frp
-        return per_day
-
-    async def fetch_location_history(
-        self,
-        lat: float,
-        lon: float,
-        days: int = 30,
-        radius_km: float = 5.0,
-        source: str = "VIIRS_SNPP_NRT",
-    ) -> Dict[str, Any]:
-        """
-        Daily detection history within `radius_km` of a point, stored in DuckDB
-        (`frp_history_daily`) and topped up from NASA FIRMS.
-
-        A stored day is reused as-is once it is older than yesterday (UTC); FIRMS
-        can still add late passes to today and yesterday, so those are refetched
-        when their stored copy is older than HISTORY_RECENT_TTL. Only the span
-        covering missing or stale days is requested from FIRMS.
-        """
-        location_key = f"{lat:.3f},{lon:.3f}"
-        now = datetime.now(timezone.utc)
-        today = now.date()
-        first_day = today - timedelta(days=days - 1)
-        settled_before = today - timedelta(days=1)
-
-        conn = get_duckdb()
-        stored = {
-            row[0]: {"detections": row[1], "max_frp_mw": row[2], "total_frp_mw": row[3], "fetched_at": row[4]}
-            for row in conn.execute(
-                """
-                SELECT day, detections, max_frp_mw, total_frp_mw, fetched_at
-                FROM frp_history_daily
-                WHERE location_key = ? AND radius_km = ? AND source = ? AND day BETWEEN ? AND ?
-                """,
-                [location_key, radius_km, source, first_day, today],
-            ).fetchall()
-        }
-
-        window = [first_day + timedelta(days=i) for i in range(days)]
-        needed = [
-            d for d in window
-            if d not in stored
-            or (d >= settled_before and now - stored[d]["fetched_at"] > HISTORY_RECENT_TTL)
-        ]
-
-        if needed:
-            fetched = await self._fetch_firms_daily(lat, lon, min(needed), max(needed), radius_km, source)
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO frp_history_daily
-                    (location_key, radius_km, day, source, detections, max_frp_mw, total_frp_mw, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    [location_key, radius_km, d, source, v["detections"], v["max_frp_mw"], v["total_frp_mw"], now]
-                    for d, v in fetched.items()
-                ],
-            )
-            stored.update({d: {**v, "fetched_at": now} for d, v in fetched.items()})
-
-        series = [
-            {
-                "date": d.isoformat(),
-                "detections": int(stored[d]["detections"]),
-                "max_frp_mw": round(float(stored[d]["max_frp_mw"]), 1),
-                "total_frp_mw": round(float(stored[d]["total_frp_mw"]), 1),
-            }
-            for d in window
-        ]
-        refetched = sum(1 for d in window if needed and min(needed) <= d <= max(needed))
-        return {
-            "latitude": lat,
-            "longitude": lon,
-            "radius_km": radius_km,
-            "days": days,
-            "source": f"NASA FIRMS {source}",
-            "total_detections": sum(d["detections"] for d in series),
-            "storage": {"days_from_duckdb": days - refetched, "days_from_firms": refetched},
-            "series": series,
-        }
 
     async def ingest_and_store(
         self,
