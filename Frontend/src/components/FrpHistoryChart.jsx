@@ -83,7 +83,7 @@ export default function FrpHistoryChart({ series }) {
           <path
             d={linePath}
             fill="none"
-            stroke="var(--color-chart)"
+            stroke="var(--color-chart-frp)"
             strokeWidth="2"
             strokeLinejoin="round"
             strokeLinecap="round"
@@ -98,7 +98,7 @@ export default function FrpHistoryChart({ series }) {
             cx={xAt(i)}
             cy={yAt(series[i].max_frp_mw)}
             r={hovered === i ? 5 : 4}
-            fill="var(--color-chart)"
+            fill="var(--color-chart-frp)"
             stroke="var(--color-card)"
             strokeWidth="2"
             vectorEffect="non-scaling-stroke"
