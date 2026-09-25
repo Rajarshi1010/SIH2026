@@ -186,7 +186,7 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
                   <FrpHistoryChart series={series} />
                 </div>
                 <p className="mt-1 font-sans text-[12px] text-text-muted">
-                  Gaps are days with no detections. Hover a day for details. Source: {history.data.source}.
+                  Dots mark days with detections; the line joins them across days with none. Hover a day for details. Source: {history.data.source}.
                 </p>
               </>
             )

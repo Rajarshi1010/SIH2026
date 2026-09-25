@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { HEIGHT, PAD, PLOT_H, WIDTH, shortDate, slotCentre, slotWidth, tooltipLeft } from './historyChartLayout';
 
-// Peak fire radiative power per day, oldest day first. A day without detections
-// has no FRP, so the line breaks there instead of dropping to a made-up zero.
-// Shares its day slots with DetectionHistoryChart so the two stack in register.
+// Peak fire radiative power per day, oldest day first. One continuous line joins
+// the days that had detections; a day without detections has no FRP, so it gets
+// no dot and the line passes straight over it rather than dropping to a made-up
+// zero. Shares its day slots with DetectionHistoryChart so the two stack in
+// register.
 
 // Round up to 1, 2, 2.5 or 5 x 10^n so gridlines land on readable values.
 const niceCeiling = (value) => {
@@ -14,22 +16,6 @@ const niceCeiling = (value) => {
 };
 
 const formatMw = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
-
-// Consecutive days with detections form one unbroken run of the line.
-const toRuns = (series) => {
-  const runs = [];
-  let current = [];
-  series.forEach((d, i) => {
-    if (d.detections > 0) {
-      current.push(i);
-    } else if (current.length) {
-      runs.push(current);
-      current = [];
-    }
-  });
-  if (current.length) runs.push(current);
-  return runs;
-};
 
 export default function FrpHistoryChart({ series }) {
   const [hovered, setHovered] = useState(null);
@@ -44,10 +30,9 @@ export default function FrpHistoryChart({ series }) {
   const xAt = (i) => slotCentre(i, count);
   const yAt = (v) => PAD.top + PLOT_H - (v / ceiling) * PLOT_H;
 
-  const runs = toRuns(series);
-  const isolated = new Set(runs.filter((r) => r.length === 1).map((r) => r[0]));
+  const observed = series.map((d, i) => (d.detections > 0 ? i : null)).filter((i) => i !== null);
+  const linePath = observed.map((i, k) => `${k === 0 ? 'M' : 'L'} ${xAt(i)} ${yAt(series[i].max_frp_mw)}`).join(' ');
   const peakIndex = series.reduce((best, d, i) => (d.max_frp_mw > series[best].max_frp_mw ? i : best), 0);
-  const markerAt = new Set([...isolated, peakIndex, ...(hovered !== null && series[hovered].detections > 0 ? [hovered] : [])]);
   const active = hovered !== null ? series[hovered] : null;
 
   return (
@@ -94,23 +79,20 @@ export default function FrpHistoryChart({ series }) {
           />
         )}
 
-        {runs
-          .filter((run) => run.length > 1)
-          .map((run) => (
-            <path
-              key={run[0]}
-              d={run.map((i, k) => `${k === 0 ? 'M' : 'L'} ${xAt(i)} ${yAt(series[i].max_frp_mw)}`).join(' ')}
-              fill="none"
-              stroke="var(--color-chart)"
-              strokeWidth="2"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-              vectorEffect="non-scaling-stroke"
-            />
-          ))}
+        {observed.length > 1 && (
+          <path
+            d={linePath}
+            fill="none"
+            stroke="var(--color-chart)"
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
 
-        {/* Markers: isolated days (no line to show them), the peak, and the hovered day */}
-        {[...markerAt].map((i) => (
+        {/* A dot on every day with detections — the only days the line is measured at */}
+        {observed.map((i) => (
           <circle
             key={i}
             cx={xAt(i)}
