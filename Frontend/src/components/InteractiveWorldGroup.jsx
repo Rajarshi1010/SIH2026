@@ -73,13 +73,17 @@ function getTargetQuaternion(lat, lng, globePos, cameraPos) {
 }
 
 // Marker dots sit just above the Earth mesh (2.3) so they don't float off the
-// surface when seen at an angle; badges sit further out for their leader lines.
+// surface when seen at an angle.
 const DOT_RADIUS = 2.34;
-const BADGE_RADIUS = 2.4;
-// Nearby detections are often a few km apart — far closer than a marker is wide
-// on screen (~20 km per px) — so anything within this distance is fanned out.
-const CLUSTER_KM = 700;
-const FAN_DISTANCE = 0.32; // world units (~40 px) from cluster centre to each badge
+const LABEL_RADIUS = 2.36;
+// Detections this close are one site: at ~20 km per screen pixel their dots
+// overlap, so they share one label listing every rank.
+const SITE_KM = 60;
+// Label offset from its site: ~17 px to the right, ~14 px up or down. At ~20 km
+// per pixel any offset spans real map distance, so the tag is boxed to read as
+// a caption rather than a detection, and starts at the end of its leader line.
+const LABEL_EAST = 0.15;
+const LABEL_NORTH = 0.12;
 
 const haversineKm = (a, b) => {
   const toRad = THREE.MathUtils.DEG2RAD;
@@ -91,95 +95,74 @@ const haversineKm = (a, b) => {
   return 6371 * 2 * Math.asin(Math.sqrt(h));
 };
 
-// Place each point's numbered badge. Isolated points get a badge straight above
-// them; clustered points are spread evenly around the cluster centre (rank 1 at
-// the top, clockwise) so every badge stays readable.
-function layoutBadges(points) {
-  const clusters = [];
+const unitVector = (point) => latLngToVector3(point.lat, point.lng, 1);
+
+// Group the ranked points into sites and place one label per site, to its right
+// and slightly up — or slightly down when the site is south of the others, so
+// neighbouring labels part.
+function layoutSites(points) {
+  const sites = [];
   points.forEach((point, index) => {
-    const home = clusters.find((c) => haversineKm(c.members[0].point, point) <= CLUSTER_KM);
     const entry = { point, rank: index + 1 };
-    if (home) home.members.push(entry);
-    else clusters.push({ members: [entry] });
+    const site = sites.find((s) => s.members.some((m) => haversineKm(m.point, point) <= SITE_KM));
+    if (site) site.members.push(entry);
+    else sites.push({ members: [entry] });
   });
 
+  const overall = points.reduce((sum, p) => sum.add(unitVector(p)), new THREE.Vector3()).normalize();
   const up = new THREE.Vector3(0, 1, 0);
-  return clusters.flatMap(({ members }) => {
+
+  return sites.map(({ members }) => {
     const centre = members
-      .reduce((sum, { point }) => sum.add(latLngToVector3(point.lat, point.lng, 1)), new THREE.Vector3())
+      .reduce((sum, { point }) => sum.add(unitVector(point)), new THREE.Vector3())
       .normalize();
     const east = new THREE.Vector3().crossVectors(up, centre).normalize();
     const north = new THREE.Vector3().crossVectors(centre, east).normalize();
+    const below = sites.length > 1 && centre.clone().sub(overall).dot(north) < 0;
 
-    return members.map(({ point, rank }, i) => {
-      const angle = members.length === 1 ? 0 : (i / members.length) * Math.PI * 2;
-      const distance = members.length === 1 ? FAN_DISTANCE * 0.6 : FAN_DISTANCE;
-      const origin = members.length === 1 ? latLngToVector3(point.lat, point.lng, 1) : centre;
-      const badge = origin
+    return {
+      key: members.map((m) => m.rank).join('-'),
+      members,
+      anchor: centre.clone().multiplyScalar(DOT_RADIUS),
+      label: centre
         .clone()
-        .multiplyScalar(BADGE_RADIUS)
-        .addScaledVector(north, Math.cos(angle) * distance)
-        .addScaledVector(east, Math.sin(angle) * distance)
-        .setLength(BADGE_RADIUS);
-      return { point, rank, dot: latLngToVector3(point.lat, point.lng, DOT_RADIUS), badge };
-    });
+        .multiplyScalar(LABEL_RADIUS)
+        .addScaledVector(east, LABEL_EAST)
+        .addScaledVector(north, below ? -LABEL_NORTH : LABEL_NORTH)
+        .setLength(LABEL_RADIUS),
+    };
   });
 }
 
 const _worldPos = new THREE.Vector3();
 const _globeCentre = new THREE.Vector3();
 
-function ThreatMarker({ point, rank, dot, badge, isSelected, onSelect }) {
-  const badgeAnchorRef = useRef();
-  const badgeRef = useRef();
+// The detection itself: a dot at its true coordinates, pulsing when selected.
+function DetectionDot({ point, isSelected, onSelect }) {
   const ringRef = useRef();
-
-  const leader = useMemo(() => {
-    const geometry = new THREE.BufferGeometry().setFromPoints([dot, badge]);
-    const material = new THREE.LineBasicMaterial({ color: '#E8EDF5', transparent: true, opacity: 0.55 });
-    return new THREE.Line(geometry, material);
-  }, [dot, badge]);
-  useEffect(() => () => {
-    leader.geometry.dispose();
-    leader.material.dispose();
-  }, [leader]);
-
+  const dot = useMemo(() => latLngToVector3(point.lat, point.lng, DOT_RADIUS), [point.lat, point.lng]);
   const ringQuaternion = useMemo(
     () => new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dot.clone().normalize()),
     [dot]
   );
 
-  useFrame(({ camera, clock }) => {
-    // Hide the badge once it rotates onto the far side of the globe.
-    const anchor = badgeAnchorRef.current;
-    if (anchor && badgeRef.current) {
-      anchor.getWorldPosition(_worldPos);
-      anchor.parent.getWorldPosition(_globeCentre);
-      const normal = _worldPos.clone().sub(_globeCentre).normalize();
-      const toCamera = camera.position.clone().sub(_worldPos).normalize();
-      const visible = normal.dot(toCamera) > 0.15;
-      badgeRef.current.style.opacity = visible ? '1' : '0';
-      badgeRef.current.style.pointerEvents = visible ? 'auto' : 'none';
-    }
-
-    if (ringRef.current) {
-      const t = (clock.getElapsedTime() * 1.5) % 1;
-      const s = 1 + t * 1.6;
-      ringRef.current.scale.set(s, s, s);
-      ringRef.current.material.opacity = 1 - t;
-    }
+  useFrame(({ clock }) => {
+    if (!ringRef.current) return;
+    const t = (clock.getElapsedTime() * 1.5) % 1;
+    const s = 1 + t * 1.6;
+    ringRef.current.scale.set(s, s, s);
+    ringRef.current.material.opacity = 1 - t;
   });
-
-  const select = (e) => {
-    e.stopPropagation();
-    if (onSelect) onSelect(point);
-  };
 
   return (
     <>
-      <primitive object={leader} />
-
-      <mesh position={dot} onClick={select}>
+      <mesh
+        position={dot}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (onSelect) onSelect(point.id);
+        }}
+      >
         <sphereGeometry args={[isSelected ? 0.042 : 0.032, 16, 16]} />
         <meshStandardMaterial color={point.color} emissive={point.color} emissiveIntensity={isSelected ? 1.6 : 0.7} roughness={0.3} />
       </mesh>
@@ -190,37 +173,91 @@ function ThreatMarker({ point, rank, dot, badge, isSelected, onSelect }) {
           <meshBasicMaterial color={point.color} transparent opacity={0.8} side={THREE.DoubleSide} />
         </mesh>
       )}
+    </>
+  );
+}
 
-      <group ref={badgeAnchorRef} position={badge}>
-        <Html center zIndexRange={[19, 10]}>
-          <button
-            ref={badgeRef}
-            type="button"
-            onClick={select}
-            aria-label={`Detection ${rank}: ${point.classificationLabel}`}
-            aria-pressed={isSelected}
+// One label per site: a boxed row of numbered buttons whose left edge sits at
+// the end of a short line from the site.
+function SiteLabel({ site, selectedPointId, onSelect }) {
+  const labelAnchorRef = useRef();
+  const rowRef = useRef();
+
+  const leader = useMemo(() => {
+    const geometry = new THREE.BufferGeometry().setFromPoints([site.anchor, site.label]);
+    const material = new THREE.LineBasicMaterial({ color: '#E8EDF5', transparent: true, opacity: 0.6 });
+    return new THREE.Line(geometry, material);
+  }, [site]);
+  useEffect(() => () => {
+    leader.geometry.dispose();
+    leader.material.dispose();
+  }, [leader]);
+
+  useFrame(({ camera }) => {
+    // Hide the label once it rotates onto the far side of the globe.
+    const anchor = labelAnchorRef.current;
+    if (!anchor || !rowRef.current) return;
+    anchor.getWorldPosition(_worldPos);
+    anchor.parent.getWorldPosition(_globeCentre);
+    const normal = _worldPos.clone().sub(_globeCentre).normalize();
+    const toCamera = camera.position.clone().sub(_worldPos).normalize();
+    const visible = normal.dot(toCamera) > 0.15;
+    rowRef.current.style.opacity = visible ? '1' : '0';
+    rowRef.current.style.pointerEvents = visible ? 'auto' : 'none';
+  });
+
+  return (
+    <>
+      <primitive object={leader} />
+      <group ref={labelAnchorRef} position={site.label}>
+        <Html zIndexRange={[19, 10]}>
+          <div
+            ref={rowRef}
             style={{
-              width: 24,
-              height: 24,
-              borderRadius: 9999,
-              border: `2px solid ${point.color}`,
-              background: '#182236',
-              color: '#E8EDF5',
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 12,
-              fontWeight: 700,
-              lineHeight: '20px',
-              textAlign: 'center',
-              cursor: 'pointer',
-              padding: 0,
-              boxShadow: isSelected
-                ? `0 0 0 3px #182236, 0 0 0 5px ${point.color}`
-                : '0 2px 8px rgba(0, 0, 0, 0.5)',
+              display: 'flex',
+              gap: 3,
+              padding: 3,
+              transform: 'translateY(-50%)',
+              background: 'rgba(24, 34, 54, 0.92)',
+              border: '1px solid #3D4A63',
+              borderRadius: 6,
+              boxShadow: '0 2px 8px rgba(0, 0, 0, 0.5)',
               transition: 'opacity 0.2s ease-out',
             }}
           >
-            {rank}
-          </button>
+            {site.members.map(({ point, rank }) => {
+              const isSelected = selectedPointId != null && selectedPointId === point.id;
+              return (
+                <button
+                  key={point.id || rank}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (onSelect) onSelect(point.id);
+                  }}
+                  aria-label={`Detection ${rank}: ${point.classificationLabel}`}
+                  aria-pressed={isSelected}
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: 9999,
+                    border: `2px solid ${point.color}`,
+                    background: isSelected ? '#3D4A63' : '#182236',
+                    color: '#E8EDF5',
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontSize: 11,
+                    fontWeight: 700,
+                    lineHeight: '16px',
+                    textAlign: 'center',
+                    cursor: 'pointer',
+                    padding: 0,
+                  }}
+                >
+                  {rank}
+                </button>
+              );
+            })}
+          </div>
         </Html>
       </group>
     </>
@@ -245,7 +282,7 @@ export default function InteractiveWorldGroup({
   const [nearPoints, setNearPoints] = useState([]);
   const [targetCoords, setTargetCoords] = useState([17.3850, 78.4867]);
   const [hasLocation, setHasLocation] = useState(null);
-  const markers = useMemo(() => layoutBadges(nearPoints), [nearPoints]);
+  const sites = useMemo(() => layoutSites(nearPoints), [nearPoints]);
 
   const stateRef = useRef({
     idleRotY: 0,
@@ -410,18 +447,21 @@ export default function InteractiveWorldGroup({
           freeze={true}
         />
 
-        {showMarkers &&
-          markers.map(({ point, rank, dot, badge }) => (
-            <ThreatMarker
-              key={point.id || rank}
-              point={point}
-              rank={rank}
-              dot={dot}
-              badge={badge}
-              isSelected={selectedPointId != null && selectedPointId === point.id}
-              onSelect={(pt) => onSelectPoint && onSelectPoint(pt.id)}
-            />
-          ))}
+        {showMarkers && (
+          <>
+            {nearPoints.map((point, index) => (
+              <DetectionDot
+                key={point.id || index}
+                point={point}
+                isSelected={selectedPointId != null && selectedPointId === point.id}
+                onSelect={onSelectPoint}
+              />
+            ))}
+            {sites.map((site) => (
+              <SiteLabel key={site.key} site={site} selectedPointId={selectedPointId} onSelect={onSelectPoint} />
+            ))}
+          </>
+        )}
       </group>
     </>
   );
