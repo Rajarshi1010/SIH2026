@@ -142,6 +142,25 @@ async def root_health_alias():
 api_v1_router = APIRouter(prefix=settings.API_V1_STR)
 
 
+@api_v1_router.api_route("", methods=["GET", "HEAD"], include_in_schema=False)
+@api_v1_router.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+async def api_v1_index():
+    """Returns directory of available v1 API endpoints."""
+    return {
+        "status": "healthy",
+        "api_version": "v1",
+        "service": settings.APP_NAME,
+        "available_endpoints": [
+            f"{settings.API_V1_STR}/health",
+            f"{settings.API_V1_STR}/gis/features",
+            f"{settings.API_V1_STR}/incidents",
+            f"{settings.API_V1_STR}/reviews",
+            f"{settings.API_V1_STR}/ws/alerts",
+        ],
+        "interactive_docs": "/docs",
+    }
+
+
 @api_v1_router.get(
     "/health",
     response_model=SystemHealthResponse,
