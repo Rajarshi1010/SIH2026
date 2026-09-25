@@ -1,5 +1,32 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import { fetchLocationHistory } from '../api';
+import DetectionHistoryChart from './DetectionHistoryChart';
 import ShapChart from './ShapChart';
+
+const HISTORY_DAYS = 30;
+
+// Loads the FIRMS detection history for the point under analysis.
+// Results are tagged with their coordinates, so switching points reads as
+// loading until the new response lands.
+const useLocationHistory = (lat, lng) => {
+  const key = `${lat},${lng}`;
+  const [result, setResult] = useState({ key: null, status: 'loading', data: null });
+
+  useEffect(() => {
+    if (lat == null || lng == null) return undefined;
+    const controller = new AbortController();
+    fetchLocationHistory(lat, lng, { days: HISTORY_DAYS, signal: controller.signal })
+      .then((data) => setResult({ key: `${lat},${lng}`, status: 'ready', data }))
+      .catch((err) => {
+        if (err.name === 'AbortError') return;
+        console.error('Error fetching location history:', err);
+        setResult({ key: `${lat},${lng}`, status: 'error', data: null });
+      });
+    return () => controller.abort();
+  }, [lat, lng]);
+
+  return result.key === key ? result : { status: 'loading', data: null };
+};
 
 const Readout = ({ label, value, mono = true }) => (
   <div>
@@ -13,6 +40,11 @@ const Readout = ({ label, value, mono = true }) => (
 );
 
 export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNotify }) {
+  const history = useLocationHistory(point.lat, point.lng);
+  const series = history.data?.series || [];
+  const activeDays = series.filter((d) => d.detections > 0).length;
+  const peakFrp = series.reduce((max, d) => Math.max(max, d.max_frp_mw), 0);
+
   const detected = point.detected_at ? new Date(point.detected_at) : null;
   const detectedLabel =
     detected && !Number.isNaN(detected.getTime())
@@ -102,6 +134,52 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
               mono={!point.emitter_name && Boolean(point.emitter_id)}
             />
           </div>
+        </div>
+
+        {/* Detection history — NASA FIRMS via /gis/history */}
+        <div className="mt-6 border-t border-border-soft pt-4">
+          <div className="flex items-baseline justify-between gap-3">
+            <h4 className="font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+              Detections nearby · last {HISTORY_DAYS} days
+            </h4>
+            {history.status === 'ready' && (
+              <span className="font-mono text-[12px] tabular-nums text-text-muted">
+                within {history.data.radius_km} km
+              </span>
+            )}
+          </div>
+
+          {history.status === 'loading' && (
+            <div className="mt-3 h-[150px] animate-pulse rounded-md bg-raised" aria-label="Loading detection history" />
+          )}
+
+          {history.status === 'error' && (
+            <p className="mt-3 font-sans text-[13px] leading-relaxed text-text-muted">
+              Couldn't load detection history from NASA FIRMS. Try reopening the analysis.
+            </p>
+          )}
+
+          {history.status === 'ready' && (
+            history.data.total_detections === 0 ? (
+              <p className="mt-3 font-sans text-[13px] leading-relaxed text-text-muted">
+                No other detections within {history.data.radius_km} km in the last {HISTORY_DAYS} days.
+              </p>
+            ) : (
+              <>
+                <div className="mt-3 grid grid-cols-3 gap-3">
+                  <Readout label="Detections" value={history.data.total_detections} />
+                  <Readout label="Active days" value={`${activeDays} / ${series.length}`} />
+                  <Readout label="Peak FRP" value={`${peakFrp} MW`} />
+                </div>
+                <div className="mt-4">
+                  <DetectionHistoryChart series={series} />
+                </div>
+                <p className="mt-1 font-sans text-[12px] text-text-muted">
+                  Daily count. Hover a day for its radiative power. Source: {history.data.source}.
+                </p>
+              </>
+            )
+          )}
         </div>
 
         {/* Explainable AI — §5.6 */}

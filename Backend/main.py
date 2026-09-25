@@ -19,7 +19,7 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import redis.asyncio as aioredis
@@ -564,6 +564,47 @@ async def get_gis_feature_collection(
         },
         "features": features,
     }
+
+
+# Per-location history is cached briefly so reopening a panel doesn't re-hit FIRMS.
+_HISTORY_CACHE: Dict[tuple, tuple] = {}
+_HISTORY_TTL_SECONDS = 900
+
+
+@api_v1_router.get(
+    "/gis/history",
+    summary="Daily Detection History Around a Location",
+    description="Daily NASA FIRMS detection counts and radiative power within a radius of a point, oldest day first.",
+)
+async def get_location_history(
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    days: int = Query(30, ge=1, le=60),
+    radius_km: Optional[float] = Query(None, gt=0, le=50),
+) -> Dict[str, Any]:
+    """Time series of past detections near a point, for the analysis panel."""
+    from ingestion import firms_ingestion_engine
+    radius = radius_km or settings.SPATIAL_SEARCH_RADIUS_KM
+    cache_key = (round(lat, 3), round(lon, 3), days, radius)
+
+    cached = _HISTORY_CACHE.get(cache_key)
+    if cached and time.monotonic() - cached[0] < _HISTORY_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        result = await firms_ingestion_engine.fetch_location_history(
+            lat=lat, lon=lon, days=days, radius_km=radius
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"NASA FIRMS history request failed: {exc}",
+        )
+
+    _HISTORY_CACHE[cache_key] = (time.monotonic(), result)
+    return result
 
 
 

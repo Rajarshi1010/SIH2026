@@ -21,6 +21,9 @@
   --color-border-soft: #2C3648;
   --color-border-strong: #3D4A63;
 
+  /* Single-series chart marks: 5.6:1 on card, 4.6:1 on raised */
+  --color-chart: #5B9BF0;
+
   --color-forest: #3EC87A;
   --color-industrial: #E84B4B;
   --color-refinery: #E8A93B;

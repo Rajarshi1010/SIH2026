@@ -16,7 +16,7 @@ import csv
 import io
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
@@ -170,6 +170,14 @@ def parse_firms_csv_stream(csv_text: str) -> List[Dict[str, Any]]:
     return incidents
 
 
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in kilometres."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 6371.0 * 2 * math.asin(math.sqrt(a))
+
+
 # ------------------------------------------------------------------------------
 # 3. Asynchronous FIRMS Ingestion Engine
 # ------------------------------------------------------------------------------
@@ -193,15 +201,20 @@ class FirmsIngestionEngine:
         self,
         source: str = "VIIRS_SNPP_NRT",
         day_range: int = 1,
+        bbox: Optional[str] = None,
+        start_date: Optional[str] = None,
     ) -> str:
         """
         Asynchronously fetches FIRMS CSV telemetry stream.
-        URL pattern: {FIRMS_API_URL}/{MAP_KEY}/{SOURCE}/{BBOX}/{DAY_RANGE}
+        URL pattern: {FIRMS_API_URL}/{MAP_KEY}/{SOURCE}/{BBOX}/{DAY_RANGE}[/{START_DATE}]
+        FIRMS accepts DAY_RANGE 1..5; START_DATE (YYYY-MM-DD) shifts the window back in time.
         """
         if not self.map_key or "your_nasa_firms" in self.map_key:
             raise ValueError("NASA FIRMS Map Key is not configured.")
 
-        url = f"{self.api_base}/{self.map_key}/{source}/{self.operational_bbox}/{day_range}"
+        url = f"{self.api_base}/{self.map_key}/{source}/{bbox or self.operational_bbox}/{day_range}"
+        if start_date:
+            url = f"{url}/{start_date}"
         masked_url = url.replace(self.map_key, "KEY_PROTECTED")
         logger.info(f"Connecting to NASA FIRMS stream: {masked_url}")
 
@@ -215,6 +228,74 @@ class FirmsIngestionEngine:
                 raise RuntimeError("FIRMS API rate limit exceeded (HTTP 429).")
             resp.raise_for_status()
             return resp.text
+
+    async def fetch_location_history(
+        self,
+        lat: float,
+        lon: float,
+        days: int = 30,
+        radius_km: float = 5.0,
+        source: str = "VIIRS_SNPP_NRT",
+    ) -> Dict[str, Any]:
+        """
+        Daily detection history within `radius_km` of a point, straight from NASA FIRMS.
+        The window is split into 5-day requests (the FIRMS maximum) fetched in parallel.
+        Days without detections are returned as zeros so the series is continuous.
+        """
+        dlat = radius_km / 111.32
+        dlon = radius_km / (111.32 * max(math.cos(math.radians(lat)), 0.01))
+        bbox = f"{lon - dlon:.4f},{lat - dlat:.4f},{lon + dlon:.4f},{lat + dlat:.4f}"
+
+        today = datetime.now(timezone.utc).date()
+        first_day = today - timedelta(days=days - 1)
+        chunks = []
+        cursor = first_day
+        while cursor <= today:
+            span = min(5, (today - cursor).days + 1)
+            chunks.append((cursor, span))
+            cursor += timedelta(days=span)
+
+        csv_texts = await asyncio.gather(*(
+            self.fetch_telemetry(source=source, day_range=span, bbox=bbox, start_date=start.isoformat())
+            for start, span in chunks
+        ))
+
+        per_day = {
+            (first_day + timedelta(days=i)).isoformat(): {"detections": 0, "max_frp_mw": 0.0, "total_frp_mw": 0.0}
+            for i in range(days)
+        }
+        for text in csv_texts:
+            for row in csv.DictReader(io.StringIO(text)):
+                try:
+                    r_lat, r_lon = float(row["latitude"]), float(row["longitude"])
+                    frp = max(float(row.get("frp") or 0.0), 0.0)
+                    day = per_day.get(row["acq_date"])
+                except (KeyError, ValueError):
+                    continue
+                if day is None or _haversine_km(lat, lon, r_lat, r_lon) > radius_km:
+                    continue
+                day["detections"] += 1
+                day["max_frp_mw"] = max(day["max_frp_mw"], frp)
+                day["total_frp_mw"] += frp
+
+        series = [
+            {
+                "date": date,
+                "detections": v["detections"],
+                "max_frp_mw": round(v["max_frp_mw"], 1),
+                "total_frp_mw": round(v["total_frp_mw"], 1),
+            }
+            for date, v in per_day.items()
+        ]
+        return {
+            "latitude": lat,
+            "longitude": lon,
+            "radius_km": radius_km,
+            "days": days,
+            "source": f"NASA FIRMS {source}",
+            "total_detections": sum(d["detections"] for d in series),
+            "series": series,
+        }
 
     async def ingest_and_store(
         self,
