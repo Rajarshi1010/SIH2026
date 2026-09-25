@@ -1,5 +1,6 @@
-import React, { useRef, useState, useEffect } from "react";
+import React, { useRef, useState, useEffect, useMemo } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
+import { Html } from "@react-three/drei";
 import * as THREE from "three";
 import RealisticGlobeMesh from "./RealisticGlobeMesh";
 import { fetchNearPoints } from "../api";
@@ -71,79 +72,158 @@ function getTargetQuaternion(lat, lng, globePos, cameraPos) {
   return new THREE.Quaternion().setFromRotationMatrix(mRot);
 }
 
-function RedThreatMarker({ point, radius = 2.52, selectedPointId, onMarkerClick }) {
-  const ring1Ref = useRef();
-  const ring2Ref = useRef();
+// Marker dots sit just above the Earth mesh (2.3) so they don't float off the
+// surface when seen at an angle; badges sit further out for their leader lines.
+const DOT_RADIUS = 2.34;
+const BADGE_RADIUS = 2.4;
+// Nearby detections are often a few km apart — far closer than a marker is wide
+// on screen (~20 km per px) — so anything within this distance is fanned out.
+const CLUSTER_KM = 700;
+const FAN_DISTANCE = 0.32; // world units (~40 px) from cluster centre to each badge
 
-  const isSelected = selectedPointId !== null && selectedPointId !== undefined && selectedPointId === point.id;
+const haversineKm = (a, b) => {
+  const toRad = THREE.MathUtils.DEG2RAD;
+  const dLat = (b.lat - a.lat) * toRad;
+  const dLng = (b.lng - a.lng) * toRad;
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(a.lat * toRad) * Math.cos(b.lat * toRad) * Math.sin(dLng / 2) ** 2;
+  return 6371 * 2 * Math.asin(Math.sqrt(h));
+};
 
-  useFrame(({ clock }) => {
-    if (isSelected) {
-      const t = clock.getElapsedTime() * 2.5;
+// Place each point's numbered badge. Isolated points get a badge straight above
+// them; clustered points are spread evenly around the cluster centre (rank 1 at
+// the top, clockwise) so every badge stays readable.
+function layoutBadges(points) {
+  const clusters = [];
+  points.forEach((point, index) => {
+    const home = clusters.find((c) => haversineKm(c.members[0].point, point) <= CLUSTER_KM);
+    const entry = { point, rank: index + 1 };
+    if (home) home.members.push(entry);
+    else clusters.push({ members: [entry] });
+  });
 
-      if (ring1Ref.current) {
-        const scale1 = 1 + (t % 1) * 1.5;
-        ring1Ref.current.scale.set(scale1, scale1, scale1);
-        ring1Ref.current.material.opacity = Math.max(0, 1 - (t % 1));
-      }
+  const up = new THREE.Vector3(0, 1, 0);
+  return clusters.flatMap(({ members }) => {
+    const centre = members
+      .reduce((sum, { point }) => sum.add(latLngToVector3(point.lat, point.lng, 1)), new THREE.Vector3())
+      .normalize();
+    const east = new THREE.Vector3().crossVectors(up, centre).normalize();
+    const north = new THREE.Vector3().crossVectors(centre, east).normalize();
 
-      if (ring2Ref.current) {
-        const scale2 = 1 + ((t + 0.5) % 1) * 1.5;
-        ring2Ref.current.scale.set(scale2, scale2, scale2);
-        ring2Ref.current.material.opacity = Math.max(0, 1 - ((t + 0.5) % 1));
-      }
+    return members.map(({ point, rank }, i) => {
+      const angle = members.length === 1 ? 0 : (i / members.length) * Math.PI * 2;
+      const distance = members.length === 1 ? FAN_DISTANCE * 0.6 : FAN_DISTANCE;
+      const origin = members.length === 1 ? latLngToVector3(point.lat, point.lng, 1) : centre;
+      const badge = origin
+        .clone()
+        .multiplyScalar(BADGE_RADIUS)
+        .addScaledVector(north, Math.cos(angle) * distance)
+        .addScaledVector(east, Math.sin(angle) * distance)
+        .setLength(BADGE_RADIUS);
+      return { point, rank, dot: latLngToVector3(point.lat, point.lng, DOT_RADIUS), badge };
+    });
+  });
+}
+
+const _worldPos = new THREE.Vector3();
+const _globeCentre = new THREE.Vector3();
+
+function ThreatMarker({ point, rank, dot, badge, isSelected, onSelect }) {
+  const badgeAnchorRef = useRef();
+  const badgeRef = useRef();
+  const ringRef = useRef();
+
+  const leader = useMemo(() => {
+    const geometry = new THREE.BufferGeometry().setFromPoints([dot, badge]);
+    const material = new THREE.LineBasicMaterial({ color: '#E8EDF5', transparent: true, opacity: 0.55 });
+    return new THREE.Line(geometry, material);
+  }, [dot, badge]);
+  useEffect(() => () => {
+    leader.geometry.dispose();
+    leader.material.dispose();
+  }, [leader]);
+
+  const ringQuaternion = useMemo(
+    () => new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dot.clone().normalize()),
+    [dot]
+  );
+
+  useFrame(({ camera, clock }) => {
+    // Hide the badge once it rotates onto the far side of the globe.
+    const anchor = badgeAnchorRef.current;
+    if (anchor && badgeRef.current) {
+      anchor.getWorldPosition(_worldPos);
+      anchor.parent.getWorldPosition(_globeCentre);
+      const normal = _worldPos.clone().sub(_globeCentre).normalize();
+      const toCamera = camera.position.clone().sub(_worldPos).normalize();
+      const visible = normal.dot(toCamera) > 0.15;
+      badgeRef.current.style.opacity = visible ? '1' : '0';
+      badgeRef.current.style.pointerEvents = visible ? 'auto' : 'none';
+    }
+
+    if (ringRef.current) {
+      const t = (clock.getElapsedTime() * 1.5) % 1;
+      const s = 1 + t * 1.6;
+      ringRef.current.scale.set(s, s, s);
+      ringRef.current.material.opacity = 1 - t;
     }
   });
 
-  const pos = latLngToVector3(point.lat, point.lng, radius);
-  const normal = pos.clone().normalize();
-  const quaternion = new THREE.Quaternion().setFromUnitVectors(
-    new THREE.Vector3(0, 0, 1),
-    normal
-  );
+  const select = (e) => {
+    e.stopPropagation();
+    if (onSelect) onSelect(point);
+  };
 
   return (
-    <group
-      position={pos}
-      quaternion={quaternion}
-      onClick={(e) => {
-        e.stopPropagation();
-        if (onMarkerClick) onMarkerClick(point);
-      }}
-    >
-      <mesh>
-        <sphereGeometry args={[0.04, 16, 16]} />
-        <meshStandardMaterial
-          color="#ef4444"
-          emissive="#ef4444"
-          emissiveIntensity={isSelected ? 2.2 : 0.8}
-          roughness={0.2}
-        />
+    <>
+      <primitive object={leader} />
+
+      <mesh position={dot} onClick={select}>
+        <sphereGeometry args={[isSelected ? 0.042 : 0.032, 16, 16]} />
+        <meshStandardMaterial color={point.color} emissive={point.color} emissiveIntensity={isSelected ? 1.6 : 0.7} roughness={0.3} />
       </mesh>
 
       {isSelected && (
-        <>
-          <mesh ref={ring1Ref} position={[0, 0, -0.002]}>
-            <ringGeometry args={[0.045, 0.065, 32]} />
-            <meshBasicMaterial
-              color="#ef4444"
-              transparent
-              opacity={0.8}
-              side={THREE.DoubleSide}
-            />
-          </mesh>
-          <mesh ref={ring2Ref} position={[0, 0, -0.002]}>
-            <ringGeometry args={[0.045, 0.065, 32]} />
-            <meshBasicMaterial
-              color="#f97316"
-              transparent
-              opacity={0.5}
-              side={THREE.DoubleSide}
-            />
-          </mesh>
-        </>
+        <mesh ref={ringRef} position={dot} quaternion={ringQuaternion}>
+          <ringGeometry args={[0.045, 0.06, 32]} />
+          <meshBasicMaterial color={point.color} transparent opacity={0.8} side={THREE.DoubleSide} />
+        </mesh>
       )}
-    </group>
+
+      <group ref={badgeAnchorRef} position={badge}>
+        <Html center zIndexRange={[19, 10]}>
+          <button
+            ref={badgeRef}
+            type="button"
+            onClick={select}
+            aria-label={`Detection ${rank}: ${point.classificationLabel}`}
+            aria-pressed={isSelected}
+            style={{
+              width: 24,
+              height: 24,
+              borderRadius: 9999,
+              border: `2px solid ${point.color}`,
+              background: '#182236',
+              color: '#E8EDF5',
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 12,
+              fontWeight: 700,
+              lineHeight: '20px',
+              textAlign: 'center',
+              cursor: 'pointer',
+              padding: 0,
+              boxShadow: isSelected
+                ? `0 0 0 3px #182236, 0 0 0 5px ${point.color}`
+                : '0 2px 8px rgba(0, 0, 0, 0.5)',
+              transition: 'opacity 0.2s ease-out',
+            }}
+          >
+            {rank}
+          </button>
+        </Html>
+      </group>
+    </>
   );
 }
 
@@ -165,11 +245,11 @@ export default function InteractiveWorldGroup({
   const [nearPoints, setNearPoints] = useState([]);
   const [targetCoords, setTargetCoords] = useState([17.3850, 78.4867]);
   const [hasLocation, setHasLocation] = useState(null);
+  const markers = useMemo(() => layoutBadges(nearPoints), [nearPoints]);
 
   const stateRef = useRef({
     idleRotY: 0,
     smoothP: 0,
-    hasTriggeredRestApi: false,
     isFullyLocked: false,
   });
 
@@ -194,6 +274,39 @@ export default function InteractiveWorldGroup({
     }
   }, []);
 
+  // Fetch the nearest detections once the globe is at rest AND the location is
+  // known, whichever happens last. Triggering this only at the moment the roll
+  // finished meant a location that arrived a moment later never loaded the list.
+  useEffect(() => {
+    if (!showMarkers || hasLocation !== true) return undefined;
+    let cancelled = false;
+    if (onBackendStatusChange) onBackendStatusChange("loading");
+
+    fetchNearPoints(targetCoords[0], targetCoords[1])
+      .then((data) => {
+        if (cancelled) return;
+        if (data && data.points) {
+          setNearPoints(data.points);
+          if (onFiresFetched) onFiresFetched(data.points);
+          if (onBackendStatusChange) onBackendStatusChange("success");
+        } else if (onBackendStatusChange) {
+          onBackendStatusChange("error");
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to fetch near points from backend:", err);
+        if (onBackendStatusChange) onBackendStatusChange("error");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // Callbacks come from the parent and are not stable; re-fetching on each
+    // parent render would hammer the API.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showMarkers, hasLocation, targetCoords]);
+
   useFrame((state, delta) => {
     const targetP = scrollProgressRef.current;
 
@@ -210,30 +323,9 @@ export default function InteractiveWorldGroup({
     if (p >= 1 && !stateRef.current.isFullyLocked) {
       stateRef.current.isFullyLocked = true;
       if (setShowMarkers) setShowMarkers(true);
-
-      if (hasLocation === true && !stateRef.current.hasTriggeredRestApi) {
-        stateRef.current.hasTriggeredRestApi = true;
-        if (onBackendStatusChange) onBackendStatusChange("loading");
-
-        fetchNearPoints(targetCoords[0], targetCoords[1])
-          .then((data) => {
-            if (data && data.points) {
-              if (setNearPoints) setNearPoints(data.points);
-              if (onFiresFetched) onFiresFetched(data.points);
-              if (onBackendStatusChange) onBackendStatusChange("success");
-            } else {
-              if (onBackendStatusChange) onBackendStatusChange("error");
-            }
-          })
-          .catch((err) => {
-            console.error("Failed to fetch near points from backend:", err);
-            if (onBackendStatusChange) onBackendStatusChange("error");
-          });
-      }
     } else if (p < 1 && stateRef.current.isFullyLocked) {
       stateRef.current.isFullyLocked = false;
       if (setShowMarkers) setShowMarkers(false);
-      stateRef.current.hasTriggeredRestApi = false;
     }
 
     // Travel is horizontal only: X rolls right -> left, Y holds at LANDING_Y.
@@ -298,12 +390,15 @@ export default function InteractiveWorldGroup({
 
   return (
     <>
+      {/* Frozen: the idle spin comes from idleRotY on this group. Letting the mesh
+          spin on its own as well drifts the texture away from the orientation
+          getTargetQuaternion aims for, so the roll would land off-target. */}
       <group ref={groupRef} position={[2.8, 0.2, 0]} scale={[1.3, 1.3, 1.3]}>
         <RealisticGlobeMesh
           userCoords={hasLocation === false ? null : targetCoords}
           nearPoints={nearPoints}
           showMarkers={false}
-          freeze={false}
+          freeze={true}
         />
       </group>
 
@@ -316,13 +411,15 @@ export default function InteractiveWorldGroup({
         />
 
         {showMarkers &&
-          nearPoints.map((point, index) => (
-            <RedThreatMarker
-              key={point.id || index}
+          markers.map(({ point, rank, dot, badge }) => (
+            <ThreatMarker
+              key={point.id || rank}
               point={point}
-              radius={2.52}
-              selectedPointId={selectedPointId}
-              onMarkerClick={onSelectPoint}
+              rank={rank}
+              dot={dot}
+              badge={badge}
+              isSelected={selectedPointId != null && selectedPointId === point.id}
+              onSelect={(pt) => onSelectPoint && onSelectPoint(pt.id)}
             />
           ))}
       </group>
