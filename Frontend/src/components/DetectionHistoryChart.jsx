@@ -1,16 +1,9 @@
 import React, { useState } from 'react';
+import { HEIGHT, PAD, PLOT_H, WIDTH, shortDate, slotWidth, tooltipLeft } from './historyChartLayout';
 
 // Daily NASA FIRMS detections around a location, oldest day first. One series,
-// so no legend — the surrounding heading names it. FRP lives in the tooltip
-// rather than on a second axis.
-const WIDTH = 420;
-const HEIGHT = 150;
-const PAD = { left: 28, right: 8, top: 18, bottom: 24 };
-const PLOT_W = WIDTH - PAD.left - PAD.right;
-const PLOT_H = HEIGHT - PAD.top - PAD.bottom;
-
-const shortDate = (iso) =>
-  new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+// so no legend — the surrounding heading names it. Radiative power has its own
+// chart (FrpHistoryChart) rather than a second axis here.
 
 // Column with a 4px rounded cap, square at the baseline.
 const columnPath = (x, y, w, h) => {
@@ -28,7 +21,7 @@ export default function DetectionHistoryChart({ series }) {
   const ceiling = peak <= 1 ? 1 : Math.ceil(peak / 2) * 2;
   const ticks = ceiling === 1 ? [0, 1] : [0, ceiling / 2, ceiling];
 
-  const slot = PLOT_W / series.length;
+  const slot = slotWidth(series.length);
   const barW = Math.min(24, Math.max(2, slot - 2)); // 2px surface gap between columns
   const xAt = (i) => PAD.left + i * slot + (slot - barW) / 2;
   const yAt = (v) => PAD.top + PLOT_H - (v / ceiling) * PLOT_H;
@@ -116,7 +109,7 @@ export default function DetectionHistoryChart({ series }) {
       {active && (
         <div
           className="pointer-events-none absolute top-0 z-10 -translate-x-1/2 rounded-sm border border-border-strong bg-raised px-2 py-1.5 whitespace-nowrap"
-          style={{ left: `${Math.min(85, Math.max(15, ((xAt(hovered) + barW / 2) / WIDTH) * 100))}%` }}
+          style={{ left: tooltipLeft(xAt(hovered) + barW / 2) }}
         >
           <div className="font-mono text-[11.5px] tabular-nums text-text-muted">{shortDate(active.date)}</div>
           <div className="mt-0.5 font-mono text-[13px] tabular-nums text-text-primary">

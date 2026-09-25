@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { fetchLocationHistory } from '../api';
 import DetectionHistoryChart from './DetectionHistoryChart';
+import FrpHistoryChart from './FrpHistoryChart';
 import ShapChart from './ShapChart';
 
 const HISTORY_DAYS = 30;
@@ -171,11 +172,21 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
                   <Readout label="Active days" value={`${activeDays} / ${series.length}`} />
                   <Readout label="Peak FRP" value={`${peakFrp} MW`} />
                 </div>
-                <div className="mt-4">
+                <div className="mt-4 font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                  Detections per day
+                </div>
+                <div className="mt-2">
                   <DetectionHistoryChart series={series} />
                 </div>
+
+                <div className="mt-5 font-sans text-[12px] font-semibold uppercase tracking-wider text-text-muted">
+                  Peak radiative power per day (MW)
+                </div>
+                <div className="mt-2">
+                  <FrpHistoryChart series={series} />
+                </div>
                 <p className="mt-1 font-sans text-[12px] text-text-muted">
-                  Daily count. Hover a day for its radiative power. Source: {history.data.source}.
+                  Gaps are days with no detections. Hover a day for details. Source: {history.data.source}.
                 </p>
               </>
             )
