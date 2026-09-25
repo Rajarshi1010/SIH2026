@@ -45,23 +45,19 @@ export const fetchHealthStatus = async () => {
   }
 };
 
-// GET /api/v1/gis/features — the map feed.
+// GET /api/v1/gis/features — the map feed. Throws when the backend can't be
+// reached, so callers can tell "backend down" apart from "no detections yet".
 export const fetchGisFeatures = async ({ limit = 500, classification, isIndustrial } = {}) => {
   const params = new URLSearchParams({ limit: String(limit) });
   if (classification) params.set("classification", classification);
   if (isIndustrial !== undefined) params.set("is_industrial", String(isIndustrial));
 
-  try {
-    const res = await fetch(`${API_BASE_URL}/gis/features?${params}`);
-    if (!res.ok) throw new Error(`gis/features responded ${res.status}`);
+  const res = await fetch(`${API_BASE_URL}/gis/features?${params}`);
+  if (!res.ok) throw new Error(`gis/features responded ${res.status}`);
 
-    const geojson = await res.json();
-    const features = Array.isArray(geojson.features) ? geojson.features : [];
-    return features.map(normalizeFeature);
-  } catch (err) {
-    console.error("Error fetching GIS features:", err);
-    return [];
-  }
+  const geojson = await res.json();
+  const features = Array.isArray(geojson.features) ? geojson.features : [];
+  return features.map(normalizeFeature);
 };
 
 // GET /api/v1/incidents — tabular feed. `confidence` here is a string label

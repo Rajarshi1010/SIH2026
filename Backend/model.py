@@ -232,7 +232,13 @@ class ResidualClassifier:
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         if MODEL_PATH.exists():
             try:
-                self.model = lgb.Booster(model_file=str(MODEL_PATH))
+                # Pass the text, not the path: a Windows checkout with
+                # core.autocrlf turns the committed model into CRLF, which
+                # LightGBM's file parser rejects and can crash the whole process
+                # on (uncatchable from Python). read_text() reads with universal
+                # newlines, so the string LightGBM sees is always LF.
+                model_text = MODEL_PATH.read_text(encoding="utf-8")
+                self.model = lgb.Booster(model_str=model_text)
                 logger.info(f"Loaded existing LightGBM classifier from {MODEL_PATH}")
                 return
             except Exception as e:

@@ -232,6 +232,33 @@ async def health_check() -> JSONResponse:
         overall_status = "unhealthy"
         http_status = status.HTTP_503_SERVICE_UNAVAILABLE
 
+    # 3. NASA FIRMS feed: without a key the map can never fill, so say so here
+    # instead of leaving the frontend with a silently empty feature list.
+    from tasks import polling_worker
+    key = settings.FIRMS_MAP_KEY or ""
+    if not key or "your_nasa_firms" in key:
+        firms_status: Dict[str, Any] = {
+            "status": "not_configured",
+            "detail": "FIRMS_MAP_KEY is missing or still the .env.example placeholder. "
+                      "Get a free key at https://firms.modaps.eosdis.nasa.gov/api/map_key/ "
+                      "and set it in .env, then restart the backend.",
+        }
+    elif polling_worker.last_error:
+        firms_status = {
+            "status": "error",
+            "detail": polling_worker.last_error,
+            "at": polling_worker.last_error_at.isoformat() if polling_worker.last_error_at else None,
+        }
+    else:
+        firms_status = {
+            "status": "ok" if polling_worker.last_run_timestamp else "pending",
+            "last_poll": polling_worker.last_run_timestamp.isoformat() if polling_worker.last_run_timestamp else None,
+            "last_ingested": polling_worker.last_run_stats.get("ingested_count"),
+            "poll_interval_s": polling_worker.interval_seconds,
+        }
+    if firms_status["status"] in ("not_configured", "error") and overall_status == "healthy":
+        overall_status = "degraded"
+
     payload = {
         "status": overall_status,
         "timestamp": now_utc.isoformat(),
@@ -239,6 +266,7 @@ async def health_check() -> JSONResponse:
         "environment": settings.APP_ENV,
         "database": db_status,
         "redis": redis_status,
+        "firms": firms_status,
     }
     return JSONResponse(content=payload, status_code=http_status)
 

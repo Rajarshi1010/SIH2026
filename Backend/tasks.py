@@ -33,6 +33,9 @@ class TelemetryPollingWorker:
         self._task: Optional[asyncio.Task] = None
         self.last_run_timestamp: Optional[datetime] = None
         self.last_run_stats: Dict[str, Any] = {}
+        # Surfaced by /health so a failing poll (e.g. missing FIRMS key) is visible.
+        self.last_error: Optional[str] = None
+        self.last_error_at: Optional[datetime] = None
 
     async def execute_cycle(self) -> Dict[str, Any]:
         """
@@ -45,9 +48,12 @@ class TelemetryPollingWorker:
         cycle_start = datetime.now(timezone.utc)
         logger.info(f"--- [Automated Polling Cycle Initiated: {cycle_start.isoformat()}] ---")
 
-        # 1. Ingestion
+        # 1. Ingestion. FIRMS day_range=1 is only the current UTC day, which stays
+        # empty until that day's first India pass is processed (mid-afternoon IST),
+        # so a fresh database would show nothing all morning. Two days covers
+        # yesterday as well; store_records skips detections it already holds.
         ingest_res = await firms_ingestion_engine.ingest_and_store(
-            source="VIIRS_SNPP_NRT", day_range=1
+            source="VIIRS_SNPP_NRT", day_range=2
         )
         new_incidents = ingest_res.get("inserted_count", 0)
         logger.info(f"Ingested {new_incidents} new incidents from NASA FIRMS.")
@@ -101,7 +107,10 @@ class TelemetryPollingWorker:
         while self.is_running:
             try:
                 await self.execute_cycle()
+                self.last_error = None
             except Exception as exc:
+                self.last_error = str(exc)
+                self.last_error_at = datetime.now(timezone.utc)
                 logger.error(f"Error in polling worker cycle: {exc}", exc_info=True)
 
             # Sleep until next scheduled interval

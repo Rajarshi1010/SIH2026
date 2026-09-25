@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
 import InteractiveWorldGroup from "./components/InteractiveWorldGroup";
 import LeafletMapSection from "./components/LeafletMapSection";
-import { fetchGisFeatures } from "./api";
+import { fetchGisFeatures, fetchHealthStatus } from "./api";
 import { CLASSIFICATIONS, CLASSIFICATION_KEYS } from "./classifications";
 import ThreatAnalysisPanel from "./components/ThreatAnalysisPanel";
 import NearestAnomalies from "./components/NearestAnomalies";
@@ -27,6 +27,36 @@ function useIsMobile() {
   return isMobile;
 }
 
+// Explains an empty map, using the backend's /health `firms` block.
+function EmptyFeedNotice({ firms }) {
+  const notConfigured = firms.status === "not_configured";
+  const failing = firms.status === "error";
+
+  const title = notConfigured
+    ? "No NASA FIRMS key configured"
+    : failing
+      ? "Satellite feed is failing"
+      : "No detections yet";
+  const body = notConfigured
+    ? "The backend can't fetch satellite detections. Set FIRMS_MAP_KEY in .env (free key from NASA FIRMS) and restart the backend."
+    : failing
+      ? firms.detail
+      : "The backend polls NASA FIRMS every 15 minutes. Detections appear once the next satellite pass has been published; this map checks again every 2 minutes.";
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-[1000] flex items-center justify-center p-6">
+      <div
+        role="status"
+        className="pointer-events-auto max-w-[380px] rounded-lg border border-border-strong bg-card px-5 py-4 text-center shadow-lg"
+      >
+        <span className={`mx-auto mb-3 block h-1.5 w-1.5 rounded-full ${notConfigured || failing ? "bg-industrial" : "bg-accent"}`} />
+        <h3 className="text-[16px] font-medium text-text-primary">{title}</h3>
+        <p className="mt-1.5 text-[14px] leading-relaxed text-text-secondary">{body}</p>
+      </div>
+    </div>
+  );
+}
+
 const HERO_STATS = [
   { value: '5-day', label: 'window' },
   { value: 'VIIRS', label: 'sensor' },
@@ -47,6 +77,7 @@ export default function App() {
   const [fireList, setFireList] = useState([]);
   const [worldPoints, setWorldPoints] = useState([]);
   const [osmBackendStatus, setOsmBackendStatus] = useState("loading");
+  const [feedNotice, setFeedNotice] = useState(null);
   const [selectedThreatPoint, setSelectedThreatPoint] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeCategories, setActiveCategories] = useState(() => CLASSIFICATION_KEYS);
@@ -66,16 +97,40 @@ export default function App() {
     );
   };
 
+  // Loads the map feed. While it is empty, asks /health why (no FIRMS key vs.
+  // waiting for the next satellite pass) and checks again every 2 minutes, so
+  // detections appear without a reload once the backend has ingested them.
   useEffect(() => {
-    fetchGisFeatures({ limit: 500 })
-      .then((features) => {
-        setWorldPoints(features);
-        setOsmBackendStatus("success");
-      })
-      .catch((err) => {
-        console.error("Error fetching /gis/features:", err);
-        setOsmBackendStatus("error");
-      });
+    let cancelled = false;
+    let retryTimer = null;
+
+    const load = () => {
+      fetchGisFeatures({ limit: 500 })
+        .then(async (features) => {
+          if (cancelled) return;
+          setWorldPoints(features);
+          setOsmBackendStatus("success");
+          if (features.length > 0) {
+            setFeedNotice(null);
+            return;
+          }
+          const health = await fetchHealthStatus();
+          if (cancelled) return;
+          setFeedNotice(health?.firms || { status: "pending" });
+          retryTimer = setTimeout(load, 120000);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          console.error("Error fetching /gis/features:", err);
+          setOsmBackendStatus("error");
+        });
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+      clearTimeout(retryTimer);
+    };
   }, []);
 
   // Smooth LERP (Linear Interpolation) Loop for continuous rotation animation
@@ -640,7 +695,10 @@ export default function App() {
 
         <div className="flex flex-col gap-4 lg:flex-row">
           {/* Map */}
-          <div className="h-[380px] min-w-0 flex-1 overflow-hidden rounded-lg border border-border-strong bg-surface sm:h-[520px] lg:h-[560px]">
+          <div className="relative h-[380px] min-w-0 flex-1 overflow-hidden rounded-lg border border-border-strong bg-surface sm:h-[520px] lg:h-[560px]">
+            {osmBackendStatus === "success" && worldPoints.length === 0 && feedNotice && (
+              <EmptyFeedNotice firms={feedNotice} />
+            )}
             {osmBackendStatus === "error" ? (
               <div className="flex h-full w-full flex-col items-center justify-center px-6 text-center">
                 <span className="mb-3 h-1.5 w-1.5 rounded-full bg-industrial" />
