@@ -50,6 +50,7 @@ export default function App() {
   const [selectedThreatPoint, setSelectedThreatPoint] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeCategories, setActiveCategories] = useState(() => CLASSIFICATION_KEYS);
+  const [unnaturalOnly, setUnnaturalOnly] = useState(true);
   const [detailPoint, setDetailPoint] = useState(null);
   const [utcClock, setUtcClock] = useState(() => new Date().toISOString().slice(11, 19));
   const mapSectionRef = useRef(null);
@@ -67,15 +68,21 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchGisFeatures({ limit: 500 })
-      .then((features) => {
-        setWorldPoints(features);
-        setOsmBackendStatus("success");
-      })
-      .catch((err) => {
-        console.error("Error fetching /gis/features:", err);
-        setOsmBackendStatus("error");
-      });
+    const loadData = () => {
+      fetchGisFeatures({ limit: 500 })
+        .then((features) => {
+          setWorldPoints(features);
+          setOsmBackendStatus("success");
+        })
+        .catch((err) => {
+          console.error("Error fetching /gis/features:", err);
+          setOsmBackendStatus("error");
+        });
+    };
+
+    loadData();
+    const intervalId = setInterval(loadData, 60000); // Refresh every 60 seconds with latest detections
+    return () => clearInterval(intervalId);
   }, []);
 
   // Smooth LERP (Linear Interpolation) Loop for continuous rotation animation
@@ -195,6 +202,10 @@ export default function App() {
   };
 
   const filteredWorldPoints = worldPoints.filter((pt) => {
+    if (unnaturalOnly) {
+      const isUnnatural = pt.is_unnatural || pt.classification === 'INDUSTRIAL_FIRE_ALERT' || pt.classification === 'UNMAPPED_INDUSTRIAL_ACCIDENT' || (pt.frp_z_score && pt.frp_z_score >= 2.0);
+      if (!isUnnatural) return false;
+    }
     if (!activeCategories.includes(pt.classification)) return false;
     if (!searchQuery) return true;
     const q = searchQuery.toLowerCase();
@@ -590,8 +601,24 @@ export default function App() {
 
         </div>
 
-        {/* Category filter pills */}
-        <div className="mb-4 flex flex-wrap gap-2">
+        {/* Category filter pills and Unnatural Tendency Switch */}
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setUnnaturalOnly((prev) => !prev)}
+            className="flex items-center gap-2 rounded-full border px-3.5 py-1.5 font-sans text-[13px] font-semibold transition-all cursor-pointer"
+            style={{
+              borderColor: unnaturalOnly ? '#E63946' : 'rgba(255, 255, 255, 0.2)',
+              backgroundColor: unnaturalOnly ? 'rgba(230, 57, 70, 0.25)' : 'rgba(255, 255, 255, 0.05)',
+              color: unnaturalOnly ? '#FF6B6B' : 'rgba(255, 255, 255, 0.8)',
+            }}
+          >
+            <span
+              className="h-2 w-2 rounded-full animate-pulse"
+              style={{ backgroundColor: unnaturalOnly ? '#E63946' : '#888' }}
+            />
+            {unnaturalOnly ? 'Unnatural Surges Only (Active)' : 'Filter: Unnatural Surges Only'}
+          </button>
           {CLASSIFICATION_KEYS.map((key) => {
             const meta = CLASSIFICATIONS[key];
             const isActive = activeCategories.includes(key);

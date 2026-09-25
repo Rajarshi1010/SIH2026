@@ -58,20 +58,90 @@ _duckdb_conn: Optional[duckdb.DuckDBPyConnection] = None
 
 
 def get_duckdb() -> duckdb.DuckDBPyConnection:
-    """Returns the persistent embedded DuckDB connection."""
+    """Returns the persistent embedded DuckDB connection (Local file or Cloud MotherDuck)."""
     global _duckdb_conn
     if _duckdb_conn is None:
-        DUCKDB_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _duckdb_conn = duckdb.connect(str(DUCKDB_FILE))
+        if getattr(settings, "MOTHERDUCK_TOKEN", None):
+            token = settings.MOTHERDUCK_TOKEN.strip()
+            conn_str = f"md:india_geoai?motherduck_token={token}"
+            _duckdb_conn = duckdb.connect(conn_str)
+            logger.info("Connected to MotherDuck Cloud Persistent Storage Engine (Database: india_geoai).")
+        else:
+            DUCKDB_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _duckdb_conn = duckdb.connect(str(DUCKDB_FILE))
+            logger.info(f"Connected to DuckDB storage engine: {DUCKDB_FILE}")
         _init_duckdb_schema(_duckdb_conn)
-        logger.info(f"Connected to DuckDB storage engine: {DUCKDB_FILE}")
     return _duckdb_conn
+
+
+def enforce_retention_policy(
+    conn: duckdb.DuckDBPyConnection,
+    retention_days: Optional[int] = None,
+    max_records: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Enforces a strict 3-month (90 days) rolling retention policy and FIFO capacity limit:
+    1. Removes any incidents older than `retention_days` (default: 90 days / 3 months).
+    2. If total records exceed `max_records` (default: 100,000), prunes oldest records (FIFO).
+    3. Cleans up unlinked review_queue items.
+    4. Triggers CHECKPOINT to release space.
+    """
+    if retention_days is None:
+        retention_days = getattr(settings, "RETENTION_DAYS", 90)
+    if max_records is None:
+        max_records = getattr(settings, "MAX_STORED_ANOMALIES", 100000)
+
+    count_before = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
+
+    # 1. Rolling time window deletion (older than 90 days)
+    conn.execute("""
+        DELETE FROM thermal_anomalies
+        WHERE detected_at < CURRENT_TIMESTAMP - INTERVAL (CAST(? AS VARCHAR) || ' days');
+    """, [retention_days])
+
+    count_after_time = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
+    time_pruned = count_before - count_after_time
+
+    # 2. FIFO capacity cap: Delete oldest entries to accommodate newest if total > max_records
+    fifo_pruned = 0
+    if count_after_time > max_records:
+        excess = count_after_time - max_records
+        conn.execute("""
+            DELETE FROM thermal_anomalies
+            WHERE id IN (
+                SELECT id FROM thermal_anomalies
+                ORDER BY detected_at ASC
+                LIMIT ?
+            );
+        """, [excess])
+        fifo_pruned = excess
+
+    # 3. Clean up orphaned review_queue entries
+    conn.execute("""
+        DELETE FROM review_queue
+        WHERE incident_id NOT IN (SELECT id FROM thermal_anomalies);
+    """)
+
+    conn.execute("CHECKPOINT;")
+    total_remaining = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
+
+    logger.info(
+        "Retention policy enforced: Pruned %d expired (>%dd), %d excess FIFO. Total remaining: %d",
+        time_pruned, retention_days, fifo_pruned, total_remaining,
+    )
+    return {
+        "time_pruned": time_pruned,
+        "fifo_pruned": fifo_pruned,
+        "total_remaining": total_remaining,
+        "retention_days": retention_days,
+        "max_records": max_records,
+    }
 
 
 def _init_duckdb_schema(conn: duckdb.DuckDBPyConnection) -> None:
     """
     Initializes the optimized Dual-Table schema in DuckDB:
-    1. india_master_structures: ~700,000 baseline land-use features with H3 integer keys.
+    1. india_master_structures: Strategic baseline industrial facilities with H3 integer keys.
     2. thermal_anomalies: Append-only time-series with ZSTD compression and downcasted types.
     3. review_queue: Analyst triage table for low-confidence or high-impact anomalies.
     """
@@ -105,7 +175,7 @@ def _init_duckdb_schema(conn: duckdb.DuckDBPyConnection) -> None:
             'Urban'
         );
 
-        -- Table 1: india_master_structures (~12 MB for ~700k features)
+        -- Table 1: india_master_structures (Strategic baseline facilities with H3 integer keys)
         CREATE TABLE IF NOT EXISTS india_master_structures (
             h3_cell UBIGINT PRIMARY KEY,
             land_use_category land_category DEFAULT 'Unclassified',

@@ -192,16 +192,23 @@ class FirmsIngestionEngine:
     async def fetch_telemetry(
         self,
         source: str = "VIIRS_SNPP_NRT",
-        day_range: int = 1,
+        day_range: int = 5,
+        target_date: Optional[str] = None,
     ) -> str:
         """
         Asynchronously fetches FIRMS CSV telemetry stream.
-        URL pattern: {FIRMS_API_URL}/{MAP_KEY}/{SOURCE}/{BBOX}/{DAY_RANGE}
+        URL pattern: {FIRMS_API_URL}/{MAP_KEY}/{SOURCE}/{BBOX}/{DAY_RANGE}[/{TARGET_DATE}]
         """
         if not self.map_key or "your_nasa_firms" in self.map_key:
             raise ValueError("NASA FIRMS Map Key is not configured.")
 
-        url = f"{self.api_base}/{self.map_key}/{source}/{self.operational_bbox}/{day_range}"
+        # Ensure day_range is clamped to NASA FIRMS max limit of 5
+        day_range = max(1, min(day_range, 5))
+        if target_date:
+            url = f"{self.api_base}/{self.map_key}/{source}/{self.operational_bbox}/{day_range}/{target_date}"
+        else:
+            url = f"{self.api_base}/{self.map_key}/{source}/{self.operational_bbox}/{day_range}"
+
         masked_url = url.replace(self.map_key, "KEY_PROTECTED")
         logger.info(f"Connecting to NASA FIRMS stream: {masked_url}")
 
@@ -219,17 +226,99 @@ class FirmsIngestionEngine:
     async def ingest_and_store(
         self,
         source: str = "VIIRS_SNPP_NRT",
-        day_range: int = 1,
+        day_range: int = 5,
+        target_date: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Executes end-to-end ingestion:
         1. Fetch CSV from NASA
         2. Parse & DEFM normalize
-        3. Upsert into TimescaleDB hypertable
+        3. Upsert into DuckDB
         """
-        csv_text = await self.fetch_telemetry(source=source, day_range=day_range)
+        csv_text = await self.fetch_telemetry(source=source, day_range=day_range, target_date=target_date)
         records = parse_firms_csv_stream(csv_text)
         return await self.store_records(records, source=source)
+
+    async def ingest_latest_multi_source(
+        self,
+        day_range: int = 3,
+        sources: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Polls multiple high-resolution VIIRS sensors in parallel:
+        - VIIRS_SNPP_NRT (Suomi-NPP 375m)
+        - VIIRS_NOAA21_NRT (NOAA-21 375m)
+        - VIIRS_NOAA20_NRT (NOAA-20 375m)
+        Guarantees maximum detection coverage and earliest alert latency across India.
+        """
+        if sources is None:
+            sources = ["VIIRS_SNPP_NRT", "VIIRS_NOAA21_NRT", "VIIRS_NOAA20_NRT"]
+
+        total_fetched = 0
+        total_inserted = 0
+        source_breakdown = {}
+
+        tasks = [self.ingest_and_store(source=src, day_range=day_range) for src in sources]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for src, res in zip(sources, results):
+            if isinstance(res, Exception):
+                logger.warning(f"Ingestion from {src} failed: {res}")
+                source_breakdown[src] = {"status": "error", "error": str(res)}
+            else:
+                total_fetched += res.get("fetched_count", 0)
+                total_inserted += res.get("inserted_count", 0)
+                source_breakdown[src] = res
+
+        return {
+            "status": "success",
+            "total_fetched": total_fetched,
+            "total_inserted": total_inserted,
+            "sources": source_breakdown,
+        }
+
+    async def backfill_historical_telemetry(
+        self,
+        days: int = 90,
+        source: str = "VIIRS_SNPP_NRT",
+    ) -> Dict[str, Any]:
+        """
+        Backfills real historical NASA FIRMS satellite data across the past `days` (up to 90 days).
+        Queries NASA FIRMS in 5-day intervals, parses DEFM footprints, and stores records in DuckDB.
+        """
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        total_fetched = 0
+        total_inserted = 0
+        chunks_processed = 0
+
+        # Query backwards in 5-day increments
+        step = 5
+        for offset in range(0, min(days, 90), step):
+            target_date = (now - timedelta(days=offset)).strftime("%Y-%m-%d")
+            logger.info(f"Backfilling FIRMS historical chunk: {target_date} (5-day window, offset: -{offset}d)...")
+            try:
+                csv_text = await self.fetch_telemetry(source=source, day_range=5, target_date=target_date)
+                records = parse_firms_csv_stream(csv_text)
+                total_fetched += len(records)
+                store_res = await self.store_records(records, source=source)
+                total_inserted += store_res.get("inserted_count", 0)
+                chunks_processed += 1
+            except Exception as exc:
+                logger.warning(f"Historical chunk failed for {target_date}: {exc}")
+
+        # Enforce 90-day retention policy after backfill
+        from database import get_duckdb, enforce_retention_policy
+        conn = get_duckdb()
+        retention_res = enforce_retention_policy(conn, retention_days=settings.RETENTION_DAYS)
+
+        return {
+            "days_backfilled": days,
+            "chunks_processed": chunks_processed,
+            "total_fetched": total_fetched,
+            "total_inserted": total_inserted,
+            "retention_status": retention_res,
+        }
 
     async def store_records(
         self,

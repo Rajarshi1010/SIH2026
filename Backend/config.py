@@ -52,9 +52,18 @@ class Settings(BaseSettings):
             return [str(item).strip() for item in v]
         return []
 
-    # --- Storage Engine (Pure DuckDB Vectorized In-Process) ---
+    # --- Storage Engine (DuckDB Local File or MotherDuck Cloud Persistent) ---
     STORAGE_ENGINE: Literal["duckdb"] = "duckdb"
     DUCKDB_PATH: str = "data/india_geoai.db"
+    MOTHERDUCK_TOKEN: Optional[str] = None
+    RETENTION_DAYS: int = 90  # Strict 3-month (90 days) rolling retention policy
+    MAX_STORED_ANOMALIES: int = 100000  # FIFO capacity limit: oldest purged to accommodate newest
+    
+    # Optional S3 / Cloudflare R2 object storage backup
+    S3_ENDPOINT_URL: Optional[str] = None
+    S3_ACCESS_KEY: Optional[str] = None
+    S3_SECRET_KEY: Optional[str] = None
+    S3_BUCKET_NAME: Optional[str] = None
 
     @field_validator("STORAGE_ENGINE", mode="before")
     @classmethod

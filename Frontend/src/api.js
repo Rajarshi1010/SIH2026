@@ -26,6 +26,9 @@ export const normalizeFeature = (feature, idx = 0) => {
     h3_index: props.h3_index || null,
     satellite: props.satellite || null,
     is_industrial: Boolean(props.is_industrial),
+    is_unnatural: Boolean(props.is_unnatural ?? (key === "INDUSTRIAL_FIRE_ALERT" || key === "UNMAPPED_INDUSTRIAL_ACCIDENT")),
+    frp_z_score: props.frp_z_score ?? null,
+    baseline_frp: props.baseline_frp ?? null,
     emitter_id: props.emitter_id ?? null,
     emitter_name: props.emitter_name ?? null,
     distance_to_emitter_m: props.distance_to_emitter_meters ?? null,
@@ -46,10 +49,11 @@ export const fetchHealthStatus = async () => {
 };
 
 // GET /api/v1/gis/features — the map feed.
-export const fetchGisFeatures = async ({ limit = 500, classification, isIndustrial } = {}) => {
+export const fetchGisFeatures = async ({ limit = 500, classification, isIndustrial, unnaturalOnly } = {}) => {
   const params = new URLSearchParams({ limit: String(limit) });
   if (classification) params.set("classification", classification);
   if (isIndustrial !== undefined) params.set("is_industrial", String(isIndustrial));
+  if (unnaturalOnly) params.set("unnatural_only", "true");
 
   try {
     const res = await fetch(`${API_BASE_URL}/gis/features?${params}`, { mode: "cors" });

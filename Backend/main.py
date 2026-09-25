@@ -62,14 +62,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         from database import get_duckdb
         conn = get_duckdb()
-        struct_count = conn.execute("SELECT count(*) FROM india_master_structures;").fetchone()[0]
+        struct_count = conn.execute("SELECT count(*) FROM india_master_structures WHERE facility_name IS NOT NULL;").fetchone()[0]
         if struct_count == 0:
-            logger.info("Cold-start deployment detected: Auto-bootstrapping India national grid...")
+            logger.info("Initializing strategic Indian industrial facilities in DuckDB / MotherDuck...")
             from seed import build_india_database
             build_india_database()
-            struct_count = conn.execute("SELECT count(*) FROM india_master_structures;").fetchone()[0]
+            struct_count = conn.execute("SELECT count(*) FROM india_master_structures WHERE facility_name IS NOT NULL;").fetchone()[0]
 
         anomalies_count = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
+        if anomalies_count == 0:
+            logger.info("Empty database detected: Ingesting real NASA FIRMS satellite observations...")
+            from ingestion import firms_ingestion_engine
+            # Ingest initial 10-day block of genuine NASA satellite telemetry
+            await firms_ingestion_engine.backfill_historical_telemetry(days=10)
+            anomalies_count = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
+
+        # Enforce 90-day retention policy on startup
+        from database import enforce_retention_policy
+        enforce_retention_policy(conn, retention_days=settings.RETENTION_DAYS, max_records=settings.MAX_STORED_ANOMALIES)
+
         logger.info("DuckDB embedded engine active. Master structures: %d, Anomalies: %d", struct_count, anomalies_count)
     except Exception as exc:
         logger.error("DuckDB initialization warning: %s", exc)
@@ -279,6 +290,50 @@ async def trigger_ingest(
 
 
 @api_v1_router.post(
+    "/telemetry/backfill",
+    summary="Trigger Historical Telemetry Backfill (Up to 90 Days)",
+    description="Fetches real historical satellite observations from NASA FIRMS in 5-day increments and runs multi-layer pipeline classification.",
+)
+async def trigger_backfill(
+    days: int = 90,
+    source: str = "VIIRS_SNPP_NRT",
+) -> Dict[str, Any]:
+    """Manually or worker-triggered historical NASA FIRMS backfill."""
+    from ingestion import firms_ingestion_engine
+    from pipeline import deterministic_pipeline
+    try:
+        days = max(1, min(days, 90))
+        backfill_res = await firms_ingestion_engine.backfill_historical_telemetry(days=days, source=source)
+        pipe_res = await deterministic_pipeline.run_batch(batch_limit=500, target_stage="all")
+        return {
+            "status": "success",
+            "backfill": backfill_res,
+            "pipeline": pipe_res,
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Historical telemetry backfill failed: {str(exc)}",
+        )
+
+
+@api_v1_router.post(
+    "/telemetry/retention/enforce",
+    summary="Enforce 3-Month Retention Policy",
+    description="Prunes any thermal incidents older than 90 days and enforces FIFO capacity limits.",
+)
+async def trigger_retention() -> Dict[str, Any]:
+    """Triggers retention cleanup and FIFO cap."""
+    from database import get_duckdb, enforce_retention_policy
+    conn = get_duckdb()
+    return enforce_retention_policy(
+        conn,
+        retention_days=settings.RETENTION_DAYS,
+        max_records=settings.MAX_STORED_ANOMALIES,
+    )
+
+
+@api_v1_router.post(
     "/pipeline/run-deterministic",
     status_code=status.HTTP_200_OK,
     summary="Trigger Layer 2 & Layer 3 Deterministic Pipeline",
@@ -302,27 +357,27 @@ async def trigger_pipeline(
 @api_v1_router.post(
     "/admin/bootstrap",
     status_code=status.HTTP_200_OK,
-    summary="Bootstrap / Re-populate DuckDB National Structures",
-    description="Synthesizes India's 541,180 H3 hexagonal cells and embeds the 17 strategic industrial facilities in DuckDB.",
+    summary="Register Strategic Industrial Facilities",
+    description="Registers strategic industrial facilities and baseline emitters in DuckDB / MotherDuck.",
 )
 async def admin_bootstrap(
     force: bool = False,
     x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key"),
 ) -> Dict[str, Any]:
-    """Manually or cloud-triggered database population routine (Protected)."""
+    """Manually or cloud-triggered strategic facilities registration routine (Protected)."""
     provided_key = x_admin_key
     if not provided_key or provided_key != settings.ADMIN_API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorized: Valid X-Admin-Key header or admin_key parameter required to trigger database bootstrap.",
+            detail="Unauthorized: Valid X-Admin-Key header or admin_key parameter required.",
         )
 
     from seed import build_india_database
     try:
-        total = build_india_database(force_grid=force)
+        total = build_india_database(force=force)
         return {
             "status": "success",
-            "message": f"Successfully initialized {total:,} India national grid structures in DuckDB.",
+            "message": f"Successfully registered {total} strategic facilities in DuckDB.",
             "total_structures": total,
         }
     except Exception as exc:
@@ -435,28 +490,7 @@ async def list_reviews(
 # ------------------------------------------------------------------------------
 # Layer 6: GIS Delivery (RFC 7946 GeoJSON) & Real-Time WebSocket Streaming
 # ------------------------------------------------------------------------------
-class ConnectionManager:
-    """Manages active WebSocket connections for real-time fire alerting."""
-
-    def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.add(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.discard(websocket)
-
-    async def broadcast(self, message: Dict[str, Any]):
-        for connection in list(self.active_connections):
-            try:
-                await connection.send_json(message)
-            except Exception:
-                self.active_connections.discard(connection)
-
-
-ws_manager = ConnectionManager()
+from ws import ws_manager
 
 
 @api_v1_router.websocket("/ws/alerts")
@@ -500,9 +534,10 @@ COLOR_MAP = {
     description="Delivers map-ready GeoJSON features styled per NTRO color mandate for MapLibre / OpenLayers / QGIS.",
 )
 async def get_gis_feature_collection(
-    limit: int = 100,
+    limit: int = 500,
     is_industrial: Optional[bool] = None,
     classification: Optional[str] = None,
+    unnatural_only: bool = False,
 ) -> Dict[str, Any]:
     """Generates standard RFC 7946 GeoJSON FeatureCollection."""
     from database import get_duckdb
@@ -517,6 +552,8 @@ async def get_gis_feature_collection(
     if classification:
         clauses.append("classification = ?")
         params.append(classification)
+    if unnatural_only:
+        clauses.append("classification IN ('INDUSTRIAL_FIRE_ALERT', 'UNMAPPED_INDUSTRIAL_ACCIDENT', 'WILDFIRE_FOREST_FIRE')")
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
@@ -539,6 +576,8 @@ async def get_gis_feature_collection(
         color = COLOR_MAP.get(c_type, "#6C757D")
         h3_hex = hex(r[1])[2:] if r[1] else ""
         conf_val = float(r[10]) / 100.0 if r[10] > 1 else float(r[10] or 0.0)
+        z_score = float(raw_meta.get("frp_z_score") or 0.0)
+        is_unnatural = c_type in ["INDUSTRIAL_FIRE_ALERT", "UNMAPPED_INDUSTRIAL_ACCIDENT", "WILDFIRE_FOREST_FIRE"] or z_score >= 2.0
 
         features.append({
             "type": "Feature",
@@ -552,6 +591,9 @@ async def get_gis_feature_collection(
                 "classification": c_type,
                 "classification_confidence": conf_val,
                 "is_industrial": bool(r[11]),
+                "is_unnatural": is_unnatural,
+                "frp_z_score": float(raw_meta.get("frp_z_score") or 0.0),
+                "baseline_frp": float(raw_meta.get("baseline_frp") or 40.0),
                 "frp_mw": float(r[6] or 0.0),
                 "brightness_k": float(r[5] or 0.0),
                 "satellite": str(r[7]),

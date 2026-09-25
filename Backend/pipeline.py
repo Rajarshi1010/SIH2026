@@ -444,8 +444,8 @@ class DeterministicPipeline:
         ml_res = await residual_classifier.classify_incident(incident)
         
         # 4. Layer 5: Conditional Multi-Tier Verification for High-Risk Inferences
-        # Triggers for Unmapped Industrial Accidents or low confidence alerts
-        if ml_res["predicted_class"] == "UNMAPPED_INDUSTRIAL_ACCIDENT" or ml_res["confidence"] < 0.70:
+        # Triggers exclusively for critical Unmapped Industrial Accidents
+        if ml_res["predicted_class"] == "UNMAPPED_INDUSTRIAL_ACCIDENT":
             verification = await verify_incident_burn_scar(
                 incident.latitude, incident.longitude, incident.detected_at
             )

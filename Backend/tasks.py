@@ -45,16 +45,14 @@ class TelemetryPollingWorker:
         cycle_start = datetime.now(timezone.utc)
         logger.info(f"--- [Automated Polling Cycle Initiated: {cycle_start.isoformat()}] ---")
 
-        # 1. Ingestion
-        ingest_res = await firms_ingestion_engine.ingest_and_store(
-            source="VIIRS_SNPP_NRT", day_range=1
-        )
-        new_incidents = ingest_res.get("inserted_count", 0)
-        logger.info(f"Ingested {new_incidents} new incidents from NASA FIRMS.")
+        # 1. Ingestion: Multi-sensor parallel VIIRS pull (SNPP + NOAA-21 + NOAA-20)
+        ingest_res = await firms_ingestion_engine.ingest_latest_multi_source(day_range=3)
+        new_incidents = ingest_res.get("total_inserted", 0)
+        logger.info(f"Ingested {new_incidents} new incidents from NASA FIRMS multi-sensor constellation.")
 
         # 2. Pipeline Execution (Layers 2, 3, 4, 5)
         pipeline_res = {}
-        from database import get_duckdb
+        from database import get_duckdb, enforce_retention_policy
         conn = get_duckdb()
         unclass_count = conn.execute("SELECT count(*) FROM thermal_anomalies WHERE classification = 'unclassified';").fetchone()[0]
 
@@ -68,7 +66,7 @@ class TelemetryPollingWorker:
 
             # 3. Broadcast to active WebSockets (Layer 6)
             try:
-                from main import ws_manager
+                from ws import ws_manager
                 await ws_manager.broadcast({
                     "event": "new_telemetry_batch",
                     "timestamp": cycle_start.isoformat(),
@@ -79,11 +77,19 @@ class TelemetryPollingWorker:
             except Exception as e:
                 logger.debug(f"WebSocket broadcast skipped: {e}")
 
+        # 4. Strict 3-month (90-day) rolling retention & FIFO capacity enforcement
+        retention_stats = enforce_retention_policy(
+            conn,
+            retention_days=settings.RETENTION_DAYS,
+            max_records=settings.MAX_STORED_ANOMALIES,
+        )
+
         self.last_run_timestamp = cycle_start
         self.last_run_stats = {
             "timestamp": cycle_start.isoformat(),
             "ingested_count": new_incidents,
             "pipeline_summary": pipeline_res,
+            "retention_status": retention_stats,
         }
         return self.last_run_stats
 
