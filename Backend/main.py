@@ -107,9 +107,20 @@ app = FastAPI(
 # ------------------------------------------------------------------------------
 # CORS Middleware
 # ------------------------------------------------------------------------------
+# Automatically support Vercel preview/production domains, localhost, and custom domains.
+# If wildcard "*" is configured, we use allow_origin_regex instead of allow_origins=["*"]
+# because the W3C Fetch specification blocks responses with Access-Control-Allow-Origin: *
+# whenever the request's credentials mode is "include". Using regex reflects the EXACT origin.
+cors_has_wildcard = "*" in settings.CORS_ORIGINS or any(str(o).strip() == "*" for o in settings.CORS_ORIGINS)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=[] if cors_has_wildcard else settings.CORS_ORIGINS,
+    allow_origin_regex=(
+        r"^https?://.*"
+        if cors_has_wildcard
+        else r"^https://.*\.vercel\.app$|^https://.*\.onrender\.com$|^http://localhost:\d+$|^http://127\.0\.0\.1:\d+$"
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

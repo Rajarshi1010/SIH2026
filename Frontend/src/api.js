@@ -37,7 +37,7 @@ export const normalizeFeature = (feature, idx = 0) => {
 
 export const fetchHealthStatus = async () => {
   try {
-    const res = await fetch(`${API_BASE_URL}/health`);
+    const res = await fetch(`${API_BASE_URL}/health`, { mode: "cors" });
     return await res.json();
   } catch (err) {
     console.error("Error fetching health status:", err);
@@ -52,7 +52,7 @@ export const fetchGisFeatures = async ({ limit = 500, classification, isIndustri
   if (isIndustrial !== undefined) params.set("is_industrial", String(isIndustrial));
 
   try {
-    const res = await fetch(`${API_BASE_URL}/gis/features?${params}`);
+    const res = await fetch(`${API_BASE_URL}/gis/features?${params}`, { mode: "cors" });
     if (!res.ok) throw new Error(`gis/features responded ${res.status}`);
 
     const geojson = await res.json();
@@ -71,7 +71,7 @@ export const fetchIncidents = async ({ limit = 50, classification } = {}) => {
   if (classification) params.set("classification", classification);
 
   try {
-    const res = await fetch(`${API_BASE_URL}/incidents?${params}`);
+    const res = await fetch(`${API_BASE_URL}/incidents?${params}`, { mode: "cors" });
     const data = await res.json();
     return { total: data.total ?? 0, items: data.items ?? [] };
   } catch (err) {
@@ -85,7 +85,7 @@ export const fetchReviews = async ({ statusFilter = "pending", limit = 50 } = {}
   const params = new URLSearchParams({ status_filter: statusFilter, limit: String(limit) });
 
   try {
-    const res = await fetch(`${API_BASE_URL}/reviews?${params}`);
+    const res = await fetch(`${API_BASE_URL}/reviews?${params}`, { mode: "cors" });
     const data = await res.json();
     return { total: data.total ?? 0, items: data.items ?? [] };
   } catch (err) {
