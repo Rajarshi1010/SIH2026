@@ -579,7 +579,7 @@ export default function App() {
           pointerEvents: 'none',
           transition: 'opacity 0.2s ease-out'
         }}>
-          <div style={{
+          <div className="themed-scroll" style={{
             width: '100%',
             maxWidth: '440px',
             maxHeight: '100%',

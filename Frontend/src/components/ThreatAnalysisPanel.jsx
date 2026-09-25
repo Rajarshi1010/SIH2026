@@ -91,7 +91,7 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-5 py-4">
+      <div className="themed-scroll flex-1 overflow-y-auto px-5 py-4">
         {/* Physical measurements straight off the feed */}
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-md border border-border-soft px-3 py-2.5">
