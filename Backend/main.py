@@ -566,15 +566,14 @@ async def get_gis_feature_collection(
     }
 
 
-# Per-location history is cached briefly so reopening a panel doesn't re-hit FIRMS.
-_HISTORY_CACHE: Dict[tuple, tuple] = {}
-_HISTORY_TTL_SECONDS = 900
-
-
 @api_v1_router.get(
     "/gis/history",
     summary="Daily Detection History Around a Location",
-    description="Daily NASA FIRMS detection counts and radiative power within a radius of a point, oldest day first.",
+    description=(
+        "Daily NASA FIRMS detection counts and radiative power within a radius of a point, "
+        "oldest day first. Stored in DuckDB (frp_history_daily); only missing days, and "
+        "today/yesterday once stale, are fetched from FIRMS."
+    ),
 )
 async def get_location_history(
     lat: float = Query(..., ge=-90, le=90),
@@ -585,14 +584,9 @@ async def get_location_history(
     """Time series of past detections near a point, for the analysis panel."""
     from ingestion import firms_ingestion_engine
     radius = radius_km or settings.SPATIAL_SEARCH_RADIUS_KM
-    cache_key = (round(lat, 3), round(lon, 3), days, radius)
-
-    cached = _HISTORY_CACHE.get(cache_key)
-    if cached and time.monotonic() - cached[0] < _HISTORY_TTL_SECONDS:
-        return cached[1]
 
     try:
-        result = await firms_ingestion_engine.fetch_location_history(
+        return await firms_ingestion_engine.fetch_location_history(
             lat=lat, lon=lon, days=days, radius_km=radius
         )
     except ValueError as exc:
@@ -602,9 +596,6 @@ async def get_location_history(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"NASA FIRMS history request failed: {exc}",
         )
-
-    _HISTORY_CACHE[cache_key] = (time.monotonic(), result)
-    return result
 
 
 
