@@ -11,6 +11,10 @@ from typing import List, Literal, Optional, Union
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Project NASA FIRMS key, used whenever FIRMS_MAP_KEY is unset, empty, or still
+# the .env.example placeholder. Set your own key in .env to override it.
+DEFAULT_FIRMS_MAP_KEY = "cc1453ca7f4aee96699a0c8d4a63b205"
+
 
 class Settings(BaseSettings):
     """
@@ -74,8 +78,17 @@ class Settings(BaseSettings):
     REDIS_URL: Optional[str] = None
 
     # --- NASA FIRMS & Remote Sensing ---
-    FIRMS_MAP_KEY: Optional[str] = "cc1453ca7f4aee96699a0c8d4a63b205"
+    FIRMS_MAP_KEY: Optional[str] = DEFAULT_FIRMS_MAP_KEY
     FIRMS_API_URL: str = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
+
+    @field_validator("FIRMS_MAP_KEY", mode="before")
+    @classmethod
+    def default_firms_key(cls, v: Optional[str]) -> str:
+        # An empty value or the .env.example placeholder would otherwise override
+        # the project key and silently stop all ingestion.
+        if not v or not str(v).strip() or "your_nasa_firms" in str(v):
+            return DEFAULT_FIRMS_MAP_KEY
+        return str(v).strip()
     # Strategic Operational Bounding Box [min_lon, min_lat, max_lon, max_lat]
     # Encompasses the entire Indian territory (West: Gujarat 68E, South: Great Nicobar 6N, East: Arunachal 98E, North: Ladakh 38N)
     OPERATIONAL_BBOX: str = "68,6,98,38"

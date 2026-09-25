@@ -16,6 +16,10 @@ function latLngToVector3(lat, lng, radius = 2.52) {
   return new THREE.Vector3(x, y, z);
 }
 
+// Geographic centre of India, used as the globe's resting view when the user's
+// location is unknown. Only a view target, never drawn as a marker.
+const INDIA_CENTRE = [22.5, 79.0];
+
 // Outer atmosphere shell radius in RealisticGlobeMesh — the sphere's true extent.
 const GLOBE_RADIUS = 2.35;
 
@@ -280,7 +284,9 @@ export default function InteractiveWorldGroup({
 
   const [showMarkers, setShowMarkers] = useState(false);
   const [nearPoints, setNearPoints] = useState([]);
-  const [targetCoords, setTargetCoords] = useState([17.3850, 78.4867]);
+  // Until the browser shares a real position the globe just faces central India;
+  // no location pin is drawn for this fallback (see userCoords below).
+  const [targetCoords, setTargetCoords] = useState(INDIA_CENTRE);
   const [hasLocation, setHasLocation] = useState(null);
   const sites = useMemo(() => layoutSites(nearPoints), [nearPoints]);
 
@@ -432,7 +438,7 @@ export default function InteractiveWorldGroup({
           getTargetQuaternion aims for, so the roll would land off-target. */}
       <group ref={groupRef} position={[2.8, 0.2, 0]} scale={[1.3, 1.3, 1.3]}>
         <RealisticGlobeMesh
-          userCoords={hasLocation === false ? null : targetCoords}
+          userCoords={hasLocation === true ? targetCoords : null}
           nearPoints={nearPoints}
           showMarkers={false}
           freeze={true}
@@ -441,7 +447,7 @@ export default function InteractiveWorldGroup({
 
       <group ref={stationaryRef} visible={false}>
         <RealisticGlobeMesh
-          userCoords={hasLocation === false ? null : targetCoords}
+          userCoords={hasLocation === true ? targetCoords : null}
           nearPoints={nearPoints}
           showMarkers={showMarkers}
           freeze={true}

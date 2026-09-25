@@ -29,6 +29,8 @@ function useIsMobile() {
 
 // Explains an empty map, using the backend's /health `firms` block.
 function EmptyFeedNotice({ firms }) {
+  // Defensive: config.py falls back to the project key, so this only shows if
+  // that built-in default is ever removed.
   const notConfigured = firms.status === "not_configured";
   const failing = firms.status === "error";
 
@@ -57,10 +59,11 @@ function EmptyFeedNotice({ firms }) {
   );
 }
 
+// Mirrors the backend worker: VIIRS S-NPP, day_range=2, polled every 900 s.
 const HERO_STATS = [
-  { value: '5-day', label: 'window' },
+  { value: '2-day', label: 'window' },
   { value: 'VIIRS', label: 'sensor' },
-  { value: '45 min', label: 'refresh' },
+  { value: '15 min', label: 'refresh' },
 ];
 
 export default function App() {
@@ -567,7 +570,7 @@ export default function App() {
           pointerEvents: 'none',
           transition: 'opacity 0.2s ease-out'
         }}>
-          <div>SATELLITE: NOAA-20 / VIIRS_NRT</div>
+          <div>SATELLITE: S-NPP / VIIRS_NRT</div>
           <div>BANDS: I4 (3.74 μm) • I5 (11.45 μm)</div>
         </div>
 

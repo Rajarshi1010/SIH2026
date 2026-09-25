@@ -76,7 +76,14 @@ _cached_industrial_coords: Optional[List[Tuple[float, float]]] = None
 
 
 def get_industrial_coords() -> List[Tuple[float, float]]:
-    """Loads and caches lat/lon coordinates of known emitters and industrial sites from DuckDB."""
+    """
+    Loads and caches lat/lon coordinates of the named industrial facilities from DuckDB.
+
+    Only rows with a facility_name (the curated list of real sites) count. The
+    seed grid's land_use_category is assigned from coarse lat/lon rectangles, not
+    real land-use data, so treating its 'Industry' cells as industry would make
+    every detection inside those rectangles look industrial.
+    """
     global _cached_industrial_coords
     if _cached_industrial_coords is not None:
         return _cached_industrial_coords
@@ -85,8 +92,8 @@ def get_industrial_coords() -> List[Tuple[float, float]]:
         import h3
         conn = get_duckdb()
         rows = conn.execute("""
-            SELECT h3_cell FROM india_master_structures 
-            WHERE facility_name IS NOT NULL OR land_use_category = 'Industry'
+            SELECT h3_cell FROM india_master_structures
+            WHERE facility_name IS NOT NULL
         """).fetchall()
         coords = []
         for (cell_int,) in rows:

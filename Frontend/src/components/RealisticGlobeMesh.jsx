@@ -87,7 +87,7 @@ export default function RealisticGlobeMesh({ userCoords, nearPoints, showMarkers
       </mesh>
 
       {/* Outward-Pointing Greenish-Blue 3D Location Pin */}
-      {showMarkers && (
+      {showMarkers && userCoords && (
         <group ref={markerGroupRef}>
           {/* Surface Pulsing Ring (Cyan/Teal) */}
           <mesh ref={ringRef} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]}>

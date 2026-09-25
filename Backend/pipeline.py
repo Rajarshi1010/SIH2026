@@ -101,26 +101,25 @@ async def verify_incident_burn_scar(
                             "status": "OCCLUDED_BY_CLOUDS",
                             "cloud_cover_pct": cloud_cover,
                             "delta_nbr": None,
-                            "verified_burn_scar": False,
+                            "verified_burn_scar": None,
                             "scene_id": latest_scene.get("id"),
-                            "notes": f"High cloud occlusion ({cloud_cover:.1f}%). Reverting to INSAT temporal trend.",
+                            "notes": f"High cloud occlusion ({cloud_cover:.1f}%); burn scar cannot be assessed from this scene.",
                         }
 
-                    # Tier 1 Optical Verification
-                    # In real optical processing, ΔNBR = (NIR-SWIR)/(NIR+SWIR)
-                    # When Sentinel-2 scene is clear, compute/estimate burn metric:
-                    # Clear scene confirmed over target location
-                    delta_nbr_est = 0.34 if "INDUSTRIAL" in str(props.get("title", "")) else 0.12
-                    is_raging = delta_nbr_est >= settings.DELTA_NBR_BURN_THRESHOLD
-
+                    # Tier 1: a clear Sentinel-2 scene exists over the target. ΔNBR
+                    # needs the scene's NIR/SWIR bands, which are not downloaded yet,
+                    # so no burn-scar value is reported rather than an invented one.
                     return {
                         "tier": "TIER_1_SENTINEL2_STAC",
-                        "status": "VERIFIED" if is_raging else "NO_SURFACE_SCAR",
+                        "status": "SCENE_AVAILABLE",
                         "cloud_cover_pct": cloud_cover,
-                        "delta_nbr": delta_nbr_est,
-                        "verified_burn_scar": is_raging,
+                        "delta_nbr": None,
+                        "verified_burn_scar": None,
                         "scene_id": latest_scene.get("id"),
-                        "notes": f"Sentinel-2 L2A scene {latest_scene.get('id')} retrieved with {cloud_cover:.1f}% cloud.",
+                        "notes": (
+                            f"Sentinel-2 L2A scene {latest_scene.get('id')} found with {cloud_cover:.1f}% cloud; "
+                            "burn-scar index (ΔNBR) not computed."
+                        ),
                     }
 
     except Exception as exc:

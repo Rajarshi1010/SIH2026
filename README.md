@@ -227,9 +227,8 @@ SIH2026/
 
 ### Option A: Local Python Execution (Zero Docker)
 ```powershell
-# 1. Setup environment, then edit .env and set FIRMS_MAP_KEY to your own key
-#    (free: https://firms.modaps.eosdis.nasa.gov/api/map_key/). With the
-#    placeholder left in, no detections are ever fetched and the map stays empty.
+# 1. Setup environment. FIRMS_MAP_KEY can stay as the placeholder: the backend
+#    then uses the project NASA FIRMS key from Backend/config.py.
 cp .env.example .env
 
 # 2. Populate India's 541,180 national grid cells (takes ~3 seconds)
