@@ -6,6 +6,15 @@ import ShapChart from './ShapChart';
 
 const HISTORY_DAYS = 30;
 
+// Where the backend served this history from: its DuckDB store, NASA FIRMS, or both.
+const storageNote = (storage) => {
+  if (!storage) return 'fetched from FIRMS';
+  const { days_from_duckdb: stored, days_from_firms: fetched } = storage;
+  if (fetched === 0) return `loaded from DuckDB (all ${stored} days)`;
+  if (stored === 0) return 'fetched from FIRMS just now and saved to DuckDB';
+  return `loaded from DuckDB (${stored} days) with ${fetched} ${fetched === 1 ? 'day' : 'days'} refreshed from FIRMS`;
+};
+
 // Loads the FIRMS detection history for the point under analysis.
 // Results are tagged with their coordinates, so switching points reads as
 // loading until the new response lands.
@@ -186,7 +195,8 @@ export default function ThreatAnalysisPanel({ point, onClose, isNotified, onNoti
                   <FrpHistoryChart series={series} />
                 </div>
                 <p className="mt-1 font-sans text-[12px] text-text-muted">
-                  Dots mark days with detections; the line joins them across days with none. Hover a day for details. Source: {history.data.source}.
+                  Dots mark days with detections; the line joins them across days with none. Hover a day for details.
+                  Data: {history.data.source}, {storageNote(history.data.storage)}.
                 </p>
               </>
             )
