@@ -159,21 +159,4 @@ def _init_duckdb_schema(conn: duckdb.DuckDBPyConnection) -> None:
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
-
-        -- Table 4: frp_history_daily (per-location daily NASA FIRMS history for
-        -- the analysis panel charts). Kept apart from thermal_anomalies so past
-        -- detections never reach the live map or the classification pipeline.
-        CREATE TABLE IF NOT EXISTS frp_history_daily (
-            location_key VARCHAR,   -- "lat,lon" rounded to 3 dp (~100 m)
-            radius_km DOUBLE,
-            day DATE,               -- UTC acquisition date, as FIRMS reports it
-            source VARCHAR,         -- FIRMS product, e.g. VIIRS_SNPP_NRT
-            detections USMALLINT,
-            -- DOUBLE, not FLOAT: 32-bit floats shift values like 7.05 enough to
-            -- round differently from the freshly fetched figures.
-            max_frp_mw DOUBLE,
-            total_frp_mw DOUBLE,
-            fetched_at TIMESTAMPTZ,
-            PRIMARY KEY (location_key, radius_km, day, source)
-        );
     """)

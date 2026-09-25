@@ -94,15 +94,6 @@ export const fetchReviews = async ({ statusFilter = "pending", limit = 50 } = {}
   }
 };
 
-// GET /api/v1/gis/history — daily NASA FIRMS detections around a point.
-// Throws so the caller can tell "no history" apart from "request failed".
-export const fetchLocationHistory = async (lat, lng, { days = 30, signal } = {}) => {
-  const params = new URLSearchParams({ lat: String(lat), lon: String(lng), days: String(days) });
-  const res = await fetch(`${API_BASE_URL}/gis/history?${params}`, { signal });
-  if (!res.ok) throw new Error(`gis/history responded ${res.status}`);
-  return res.json();
-};
-
 export const fetchNearPoints = async (lat, lng) => {
   const features = await fetchGisFeatures({ limit: 200 });
   return {

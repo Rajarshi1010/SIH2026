@@ -114,13 +114,6 @@ export default function App() {
   useEffect(() => {
     if (isMobile) return undefined;
 
-    // The wheel still scrubs the roll, but once the wheel goes quiet the roll
-    // finishes in the direction it was heading, so the globe always ends facing
-    // the user's location (or back at the landing pose) instead of wherever
-    // the last wheel tick left it.
-    let snapTimer = null;
-    let lastDirection = 0;
-
     const handleWheel = (e) => {
       const atTop = window.scrollY <= 5;
       const currentTarget = targetProgressRef.current;
@@ -132,27 +125,21 @@ export default function App() {
         const nextTarget = Math.min(1, Math.max(0, currentTarget + delta));
 
         targetProgressRef.current = nextTarget;
-        if (e.deltaY !== 0) lastDirection = Math.sign(e.deltaY);
-
-        clearTimeout(snapTimer);
-        snapTimer = setTimeout(() => {
-          const t = targetProgressRef.current;
-          if (t > 0 && t < 1) targetProgressRef.current = lastDirection > 0 ? 1 : 0;
-        }, 150);
       }
     };
 
     const handleKeydown = (e) => {
       const atTop = window.scrollY <= 5;
       const currentTarget = targetProgressRef.current;
+      const step = 0.25;
 
       if (currentTarget < 1 || (atTop && ["ArrowUp", "PageUp"].includes(e.code))) {
         if (["ArrowDown", "PageDown", "Space"].includes(e.code)) {
           e.preventDefault();
-          targetProgressRef.current = 1;
+          targetProgressRef.current = Math.min(1, currentTarget + step);
         } else if (["ArrowUp", "PageUp"].includes(e.code) && atTop) {
           e.preventDefault();
-          targetProgressRef.current = 0;
+          targetProgressRef.current = Math.max(0, currentTarget - step);
         }
       }
     };
@@ -161,7 +148,6 @@ export default function App() {
     window.addEventListener("keydown", handleKeydown);
 
     return () => {
-      clearTimeout(snapTimer);
       window.removeEventListener("wheel", handleWheel);
       window.removeEventListener("keydown", handleKeydown);
     };
@@ -207,9 +193,6 @@ export default function App() {
     pendingMapScrollRef.current = false;
     targetProgressRef.current = 1;
   };
-
-  // One selection shared by the globe badges and the nearest-anomalies cards.
-  const toggleNearbyPoint = (id) => setExpandedId((current) => (current === id ? null : id));
 
   const filteredWorldPoints = worldPoints.filter((pt) => {
     if (!activeCategories.includes(pt.classification)) return false;
@@ -555,7 +538,7 @@ export default function App() {
                 onProgressChange={setHeroProgress}
                 onBackendStatusChange={setBackendStatus}
                 selectedPointId={expandedId}
-                onSelectPoint={toggleNearbyPoint}
+                onSelectPoint={(id) => setExpandedId(id)}
                 onFiresFetched={(points) => setFireList(points.slice(0, 5))}
               />
             </React.Suspense>
@@ -579,14 +562,14 @@ export default function App() {
           pointerEvents: 'none',
           transition: 'opacity 0.2s ease-out'
         }}>
-          <div className="themed-scroll" style={{
+          <div style={{
             width: '100%',
             maxWidth: '440px',
             maxHeight: '100%',
             overflowY: isMobile ? 'auto' : 'visible',
             pointerEvents: heroProgress > 0.8 ? 'auto' : 'none'
           }}>
-            <NearestAnomalies points={fireList} expandedId={expandedId} onToggle={toggleNearbyPoint} />
+            <NearestAnomalies points={fireList} />
           </div>
         </div>
 
