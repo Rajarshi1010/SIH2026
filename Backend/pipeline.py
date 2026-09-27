@@ -29,6 +29,7 @@ as mandated by spec.md:
      are marked as "RESIDUAL_CANDIDATE" to be evaluated by Layer 4 (LightGBM).
 """
 
+import asyncio
 import logging
 import math
 from datetime import datetime, timezone
@@ -84,7 +85,8 @@ async def verify_incident_burn_scar(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        # Strict 1.5s timeout prevents blocking pipeline execution
+        async with httpx.AsyncClient(timeout=1.5) as client:
             resp = await client.post(settings.STAC_API_URL, json=search_payload)
             if resp.status_code == 200:
                 data = resp.json()
@@ -453,28 +455,25 @@ class DeterministicPipeline:
             meta["layer_5_verification"] = verification
             incident.raw_metadata = meta
 
-            # Push to ReviewQueue with verification context
+            # Queue ReviewQueue entry with verification context
             priority_val = "high" if ml_res["predicted_class"] == "UNMAPPED_INDUSTRIAL_ACCIDENT" else "medium"
             notes_val = (
                 f"Layer 4 ML routed to HITL: Class={ml_res['predicted_class']}, "
                 f"Conf={ml_res['confidence']:.2f}. "
                 f"Layer 5 Verification: Tier={verification.get('tier')}, Status={verification.get('status')}"
             )
-            conn = get_duckdb()
-            conn.execute("""
-                INSERT INTO review_queue (
-                    id, incident_id, incident_detected_at, status, priority,
-                    ai_classification, ai_confidence, reviewer_notes
-                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?);
-            """, [
-                str(uuid.uuid4()),
-                str(incident.id),
-                incident.detected_at,
-                priority_val,
-                ml_res["predicted_class"],
-                float(ml_res["confidence"]),
-                notes_val,
-            ])
+            review_entry = {
+                "id": str(uuid.uuid4()),
+                "incident_id": str(incident.id),
+                "incident_detected_at": incident.detected_at,
+                "status": "pending",
+                "priority": priority_val,
+                "ai_classification": ml_res["predicted_class"],
+                "ai_confidence": float(ml_res["confidence"]),
+                "reviewer_notes": notes_val,
+            }
+        else:
+            review_entry = None
 
         return {
             "classification": ml_res["predicted_class"],
@@ -482,6 +481,7 @@ class DeterministicPipeline:
             "is_industrial": ml_res["is_industrial"],
             "shap_attribution": ml_res["shap_attribution"],
             "notes": "Classified via Layer 4 LightGBM + TreeSHAP explainability engine.",
+            "review_entry": review_entry,
         }
 
     async def run_batch(
@@ -493,10 +493,10 @@ class DeterministicPipeline:
         Processes incidents from DuckDB:
         - If target_stage == 'all' or 'unclassified': processes unclassified records through Layers 2, 3, & 4.
         - If target_stage == 'residuals': re-processes records currently tagged as RESIDUAL_CANDIDATE through Layer 4 ML.
+        Uses vectorized batch updates to eliminate event-loop blocking and health check timeouts.
         """
-        from database import get_duckdb
+        from database import get_duckdb, db_lock
         import json
-        conn = get_duckdb()
 
         filter_clause = (
             "classification = 'RESIDUAL_CANDIDATE'"
@@ -504,16 +504,18 @@ class DeterministicPipeline:
             else "classification IN ('unclassified', 'RESIDUAL_CANDIDATE')"
         )
 
-        rows = conn.execute(f"""
-            SELECT id, h3_cell, detected_at, latitude, longitude,
-                   brightness_mir, bright_t31, frp, satellite, confidence,
-                   classification, classification_confidence, is_industrial,
-                   emitter_id, distance_to_emitter_meters, raw_metadata
-            FROM thermal_anomalies
-            WHERE {filter_clause}
-            ORDER BY detected_at DESC
-            LIMIT ?;
-        """, [batch_limit]).fetchall()
+        with db_lock:
+            conn = get_duckdb()
+            rows = conn.execute(f"""
+                SELECT id, h3_cell, detected_at, latitude, longitude,
+                       brightness_mir, bright_t31, frp, satellite, confidence,
+                       classification, classification_confidence, is_industrial,
+                       emitter_id, distance_to_emitter_meters, raw_metadata
+                FROM thermal_anomalies
+                WHERE {filter_clause}
+                ORDER BY detected_at DESC
+                LIMIT ?;
+            """, [batch_limit]).fetchall()
 
         if not rows:
             return {
@@ -523,6 +525,8 @@ class DeterministicPipeline:
 
         processed = 0
         stats: Dict[str, int] = {}
+        updates_batch: List[Dict[str, Any]] = []
+        reviews_batch: List[Dict[str, Any]] = []
 
         for row in rows:
             raw_meta = json.loads(row[15]) if isinstance(row[15], str) else (row[15] or {})
@@ -561,30 +565,67 @@ class DeterministicPipeline:
             stats[c_type] = stats.get(c_type, 0) + 1
             processed += 1
 
+            if res.get("review_entry"):
+                reviews_batch.append(res["review_entry"])
+
             # Normalize confidence to UTINYINT (0-100)
             conf_val = inc.classification_confidence
             conf_int = int(round(conf_val * 100)) if isinstance(conf_val, float) else int(conf_val or 0)
 
-            conn.execute("""
-                UPDATE thermal_anomalies SET
-                    classification = ?::hazard_class,
-                    classification_confidence = ?,
-                    is_industrial = ?,
-                    emitter_id = ?,
-                    distance_to_emitter_meters = ?,
-                    raw_metadata = ?
-                WHERE id = ?;
-            """, [
-                inc.classification,
-                conf_int,
-                inc.is_industrial,
-                str(inc.emitter_id) if inc.emitter_id else None,
-                inc.distance_to_emitter_meters,
-                json.dumps(inc.raw_metadata),
-                str(inc.id),
-            ])
+            updates_batch.append({
+                "id": str(inc.id),
+                "classification": inc.classification,
+                "classification_confidence": conf_int,
+                "is_industrial": inc.is_industrial,
+                "emitter_id": str(inc.emitter_id) if inc.emitter_id else None,
+                "distance_to_emitter_meters": float(inc.distance_to_emitter_meters) if inc.distance_to_emitter_meters is not None else None,
+                "raw_metadata": json.dumps(inc.raw_metadata),
+            })
 
-        conn.execute("CHECKPOINT;")
+        # Synchronous batch update in thread pool to avoid blocking the event loop
+        def _sync_pipeline_commit(u_list, r_list):
+            import pyarrow as pa
+            from database import get_duckdb, db_lock
+
+            with db_lock:
+                c = get_duckdb()
+                if u_list:
+                    u_table = pa.Table.from_pylist(u_list)
+                    c.register("batch_pipeline_updates", u_table)
+                    c.execute("""
+                        UPDATE thermal_anomalies
+                        SET
+                            classification = bpu.classification::hazard_class,
+                            classification_confidence = bpu.classification_confidence::UTINYINT,
+                            is_industrial = bpu.is_industrial::BOOLEAN,
+                            emitter_id = bpu.emitter_id::UUID,
+                            distance_to_emitter_meters = bpu.distance_to_emitter_meters::FLOAT,
+                            raw_metadata = bpu.raw_metadata::JSON
+                        FROM batch_pipeline_updates bpu
+                        WHERE thermal_anomalies.id = bpu.id::UUID;
+                    """)
+                    c.unregister("batch_pipeline_updates")
+
+                if r_list:
+                    r_table = pa.Table.from_pylist(r_list)
+                    c.register("batch_reviews", r_table)
+                    c.execute("""
+                        INSERT INTO review_queue (
+                            id, incident_id, incident_detected_at, status, priority,
+                            ai_classification, ai_confidence, reviewer_notes
+                        )
+                        SELECT
+                            id::UUID, incident_id::UUID, incident_detected_at::TIMESTAMPTZ,
+                            status::VARCHAR, priority::VARCHAR, ai_classification::VARCHAR,
+                            ai_confidence::FLOAT, reviewer_notes::TEXT
+                        FROM batch_reviews;
+                    """)
+                    c.unregister("batch_reviews")
+
+                c.execute("CHECKPOINT;")
+
+        await asyncio.to_thread(_sync_pipeline_commit, updates_batch, reviews_batch)
+
         return {
             "status": "success",
             "processed_count": processed,

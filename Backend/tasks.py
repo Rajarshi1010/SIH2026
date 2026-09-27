@@ -45,19 +45,28 @@ class TelemetryPollingWorker:
         cycle_start = datetime.now(timezone.utc)
         logger.info(f"--- [Automated Polling Cycle Initiated: {cycle_start.isoformat()}] ---")
 
-        # 1. Ingestion: Multi-sensor parallel VIIRS pull (SNPP + NOAA-21 + NOAA-20)
-        ingest_res = await firms_ingestion_engine.ingest_latest_multi_source(day_range=3)
+        from database import get_duckdb, db_lock, enforce_retention_policy
+        with db_lock:
+            conn = get_duckdb()
+            total_records = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
+
+        # Use 3-day window on fresh database; use 1-day window for efficient 15-minute polling cycles
+        poll_days = 3 if total_records < 50 else 1
+        ingest_res = await firms_ingestion_engine.ingest_latest_multi_source(day_range=poll_days)
         new_incidents = ingest_res.get("total_inserted", 0)
-        logger.info(f"Ingested {new_incidents} new incidents from NASA FIRMS multi-sensor constellation.")
+        total_fetched = ingest_res.get("total_fetched", 0)
+        logger.info(
+            f"Constellation Ingest ({poll_days}-day window): {new_incidents} NEW incidents ingested "
+            f"({total_fetched - new_incidents} duplicate detections skipped)."
+        )
 
         # 2. Pipeline Execution (Layers 2, 3, 4, 5)
         pipeline_res = {}
-        from database import get_duckdb, enforce_retention_policy
-        conn = get_duckdb()
-        unclass_count = conn.execute("SELECT count(*) FROM thermal_anomalies WHERE classification = 'unclassified';").fetchone()[0]
+        with db_lock:
+            unclass_count = conn.execute("SELECT count(*) FROM thermal_anomalies WHERE classification = 'unclassified';").fetchone()[0]
 
         if new_incidents > 0 or unclass_count > 0:
-            batch_size = max(new_incidents + unclass_count, 150)
+            batch_size = min(max(new_incidents + unclass_count, 100), 200)
             logger.info(f"Triggering pipeline for {unclass_count} unclassified incidents ({new_incidents} freshly ingested)...")
             pipeline_res = await deterministic_pipeline.run_batch(
                 batch_limit=batch_size, target_stage="all"
@@ -77,8 +86,9 @@ class TelemetryPollingWorker:
             except Exception as e:
                 logger.debug(f"WebSocket broadcast skipped: {e}")
 
-        # 4. Strict 3-month (90-day) rolling retention & FIFO capacity enforcement
-        retention_stats = enforce_retention_policy(
+        # 4. Strict 3-month (90-day) rolling retention & FIFO capacity enforcement (executed in worker thread)
+        retention_stats = await asyncio.to_thread(
+            enforce_retention_policy,
             conn,
             retention_days=settings.RETENTION_DAYS,
             max_records=settings.MAX_STORED_ANOMALIES,

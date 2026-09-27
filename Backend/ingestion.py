@@ -170,6 +170,56 @@ def parse_firms_csv_stream(csv_text: str) -> List[Dict[str, Any]]:
     return incidents
 
 
+def _batch_insert_sync(staging_data: List[Dict[str, Any]]) -> Tuple[int, int]:
+    """Worker-thread synchronous vectorized batch insert into DuckDB / MotherDuck."""
+    if not staging_data:
+        return 0, 0
+    import pyarrow as pa
+    from database import get_duckdb, db_lock
+
+    arrow_table = pa.Table.from_pylist(staging_data)
+    with db_lock:
+        conn = get_duckdb()
+        count_before = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
+        conn.register("batch_staging", arrow_table)
+        conn.execute("""
+            INSERT INTO thermal_anomalies (
+                id, h3_cell, detected_at, latitude, longitude,
+                brightness_mir, bright_t31, frp, satellite, confidence,
+                classification, classification_confidence, is_industrial,
+                raw_metadata
+            )
+            SELECT
+                bs.id::UUID,
+                bs.h3_cell::UBIGINT,
+                bs.detected_at::TIMESTAMPTZ,
+                bs.latitude::FLOAT,
+                bs.longitude::FLOAT,
+                bs.brightness_mir::USMALLINT,
+                bs.bright_t31::USMALLINT,
+                bs.frp::USMALLINT,
+                bs.satellite::satellite_source,
+                bs.confidence::VARCHAR,
+                'unclassified'::hazard_class,
+                0::UTINYINT,
+                FALSE::BOOLEAN,
+                bs.raw_metadata::JSON
+            FROM batch_staging bs
+            WHERE NOT EXISTS (
+                SELECT 1 FROM thermal_anomalies t
+                WHERE t.detected_at = bs.detected_at::TIMESTAMPTZ
+                  AND t.satellite = bs.satellite::satellite_source
+                  AND ABS(t.latitude - bs.latitude::FLOAT) < 0.0001
+                  AND ABS(t.longitude - bs.longitude::FLOAT) < 0.0001
+            );
+        """)
+        conn.unregister("batch_staging")
+        count_after = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
+        conn.execute("CHECKPOINT;")
+        inserted = max(0, count_after - count_before)
+        return inserted, len(staging_data)
+
+
 # ------------------------------------------------------------------------------
 # 3. Asynchronous FIRMS Ingestion Engine
 # ------------------------------------------------------------------------------
@@ -212,8 +262,17 @@ class FirmsIngestionEngine:
         masked_url = url.replace(self.map_key, "KEY_PROTECTED")
         logger.info(f"Connecting to NASA FIRMS stream: {masked_url}")
 
+        # Silence httpx request logger to fix credential leak vulnerability in container logs (CWE-532)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url)
+            try:
+                resp = await client.get(url)
+            except Exception as exc:
+                clean_err = str(exc).replace(self.map_key, "KEY_PROTECTED")
+                raise RuntimeError(f"FIRMS API connection failed: {clean_err}") from None
+
             if resp.status_code == 400 and "Invalid API call" in resp.text:
                 raise RuntimeError(
                     f"FIRMS API rejected request: {resp.text}. Check format: {masked_url}"
@@ -325,72 +384,52 @@ class FirmsIngestionEngine:
         records: List[Dict[str, Any]],
         source: str = "VIIRS_SNPP_NRT",
     ) -> Dict[str, Any]:
-        """Stores parsed telemetry records into DuckDB or PostgreSQL."""
+        """Stores parsed telemetry records into DuckDB using non-blocking vectorized batch insertion."""
         if not records:
             return {
                 "source": source,
                 "fetched_count": 0,
                 "inserted_count": 0,
+                "skipped_count": 0,
                 "message": "No thermal anomalies detected in operational bounds.",
             }
 
-        inserted = 0
         import json
-
-        conn = get_duckdb()
+        staging_data = []
         for item in records:
-            h3_int = int(item["h3_index"], 16) if isinstance(item["h3_index"], str) else int(item["h3_index"])
-            sat_val = "VIIRS" if "VIIRS" in str(item["instrument"]).upper() else "MODIS"
+            h3_val = item.get("h3_index")
+            try:
+                h3_int = int(h3_val, 16) if isinstance(h3_val, str) else int(h3_val)
+            except Exception:
+                h3_int = 0
+            sat_val = "VIIRS" if "VIIRS" in str(item.get("instrument", "")).upper() else "MODIS"
+            staging_data.append({
+                "id": str(uuid.uuid4()),
+                "h3_cell": h3_int,
+                "detected_at": item["detected_at"],
+                "latitude": float(item["latitude"]),
+                "longitude": float(item["longitude"]),
+                "brightness_mir": int(round(item["brightness"])),
+                "bright_t31": int(round(item.get("bright_t31") or 0)),
+                "frp": int(round(item.get("frp") or 0)),
+                "satellite": sat_val,
+                "confidence": str(item.get("confidence", "nominal")),
+                "raw_metadata": json.dumps(item.get("raw_metadata") or {})
+            })
 
-            # Check for existing record to prevent duplicates (accounting for satellite source)
-            existing = conn.execute("""
-                SELECT id FROM thermal_anomalies
-                WHERE detected_at = ?
-                  AND satellite = ?::satellite_source
-                  AND ABS(latitude - ?) < 0.0001
-                  AND ABS(longitude - ?) < 0.0001
-                LIMIT 1;
-            """, [item["detected_at"], sat_val, item["latitude"], item["longitude"]]).fetchone()
-
-            if existing:
-                continue
-
-            # Insert into DuckDB with primitive integer downcasting (~12-15 bytes)
-            conn.execute("""
-                INSERT INTO thermal_anomalies (
-                    id, h3_cell, detected_at, latitude, longitude,
-                    brightness_mir, bright_t31, frp, satellite, confidence,
-                    classification, classification_confidence, is_industrial,
-                    raw_metadata
-                ) VALUES (
-                    ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?::satellite_source, ?,
-                    'unclassified'::hazard_class, 0, FALSE,
-                    ?
-                );
-            """, [
-                str(uuid.uuid4()),
-                h3_int,
-                item["detected_at"],
-                item["latitude"],
-                item["longitude"],
-                int(item["brightness"]),
-                int(item["bright_t31"] or 0),
-                int(item["frp"]),
-                sat_val,
-                item["confidence"],
-                json.dumps(item["raw_metadata"])
-            ])
-            inserted += 1
-
-        conn.execute("CHECKPOINT;")
-        logger.info(f"[DuckDB] Ingestion successful: {inserted}/{len(records)} incidents saved.")
+        inserted, total = await asyncio.to_thread(_batch_insert_sync, staging_data)
+        skipped = total - inserted
+        logger.info(
+            f"[DuckDB] Ingestion ({source}): {inserted} NEW incidents saved "
+            f"({skipped} duplicate observations skipped from satellite sliding window)."
+        )
 
         return {
             "source": source,
             "engine": "duckdb",
-            "fetched_count": len(records),
+            "fetched_count": total,
             "inserted_count": inserted,
+            "skipped_count": skipped,
             "status": "success",
         }
 
