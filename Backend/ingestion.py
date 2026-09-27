@@ -25,7 +25,7 @@ import h3
 from shapely.affinity import rotate
 from shapely.geometry import Point, Polygon
 from config import settings
-from database import get_duckdb
+from database import get_duckdb, db_lock, safe_checkpoint
 
 logger = logging.getLogger("geoai.ingestion")
 
@@ -215,7 +215,7 @@ def _batch_insert_sync(staging_data: List[Dict[str, Any]]) -> Tuple[int, int]:
         """)
         conn.unregister("batch_staging")
         count_after = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
-        conn.execute("CHECKPOINT;")
+        safe_checkpoint(conn)
         inserted = max(0, count_after - count_before)
         return inserted, len(staging_data)
 
@@ -367,9 +367,10 @@ class FirmsIngestionEngine:
                 logger.warning(f"Historical chunk failed for {target_date}: {exc}")
 
         # Enforce 90-day retention policy after backfill
-        from database import get_duckdb, enforce_retention_policy
-        conn = get_duckdb()
-        retention_res = enforce_retention_policy(conn, retention_days=settings.RETENTION_DAYS)
+        from database import get_duckdb, db_lock, enforce_retention_policy
+        with db_lock:
+            conn = get_duckdb()
+            retention_res = enforce_retention_policy(conn, retention_days=settings.RETENTION_DAYS)
 
         return {
             "days_backfilled": days,

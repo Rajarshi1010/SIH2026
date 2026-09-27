@@ -60,16 +60,31 @@ db_lock = threading.RLock()
 _duckdb_conn: Optional[duckdb.DuckDBPyConnection] = None
 
 
+def safe_checkpoint(conn: duckdb.DuckDBPyConnection) -> None:
+    """Safely executes CHECKPOINT, ignoring errors on remote cloud engines like MotherDuck."""
+    try:
+        conn.execute("CHECKPOINT;")
+    except Exception as exc:
+        logger.debug("CHECKPOINT skipped or not supported on this engine: %s", exc)
+
+
 def get_duckdb() -> duckdb.DuckDBPyConnection:
-    """Returns the persistent embedded DuckDB connection (Local file or Cloud MotherDuck)."""
+    """Returns the persistent embedded DuckDB connection (Local file or Cloud MotherDuck with fallback)."""
     global _duckdb_conn
     with db_lock:
         if _duckdb_conn is None:
-            if getattr(settings, "MOTHERDUCK_TOKEN", None):
-                token = settings.MOTHERDUCK_TOKEN.strip()
-                conn_str = f"md:india_geoai?motherduck_token={token}"
-                _duckdb_conn = duckdb.connect(conn_str)
-                logger.info("Connected to MotherDuck Cloud Persistent Storage Engine (Database: india_geoai).")
+            token = getattr(settings, "MOTHERDUCK_TOKEN", None)
+            if token and token.strip():
+                conn_str = f"md:india_geoai?motherduck_token={token.strip()}"
+                try:
+                    logger.info("Connecting to MotherDuck Cloud Persistent Storage Engine (india_geoai)...")
+                    _duckdb_conn = duckdb.connect(conn_str)
+                    logger.info("Connected to MotherDuck Cloud Persistent Storage Engine successfully.")
+                except Exception as md_err:
+                    logger.warning("MotherDuck connection failed: %s. Falling back to local DuckDB file.", md_err)
+                    DUCKDB_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    _duckdb_conn = duckdb.connect(str(DUCKDB_FILE))
+                    logger.info(f"Connected to fallback DuckDB storage engine: {DUCKDB_FILE}")
             else:
                 DUCKDB_FILE.parent.mkdir(parents=True, exist_ok=True)
                 _duckdb_conn = duckdb.connect(str(DUCKDB_FILE))
@@ -127,7 +142,7 @@ def enforce_retention_policy(
             WHERE incident_id NOT IN (SELECT id FROM thermal_anomalies);
         """)
 
-        conn.execute("CHECKPOINT;")
+        safe_checkpoint(conn)
         total_remaining = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]
 
         logger.info(
@@ -145,7 +160,7 @@ def enforce_retention_policy(
 
 def _init_duckdb_schema(conn: duckdb.DuckDBPyConnection) -> None:
     """
-    Initializes the optimized Dual-Table schema in DuckDB:
+    Initializes the optimized Dual-Table schema in DuckDB / MotherDuck:
     1. india_master_structures: Strategic baseline industrial facilities with H3 integer keys.
     2. thermal_anomalies: Append-only time-series with ZSTD compression and downcasted types.
     3. review_queue: Analyst triage table for low-confidence or high-impact anomalies.
@@ -213,10 +228,6 @@ def _init_duckdb_schema(conn: duckdb.DuckDBPyConnection) -> None:
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
 
-        -- Index on h3_cell and detected_at for sub-millisecond lookups
-        CREATE INDEX IF NOT EXISTS idx_thermal_anomalies_h3 ON thermal_anomalies (h3_cell);
-        CREATE INDEX IF NOT EXISTS idx_thermal_anomalies_time ON thermal_anomalies (detected_at);
-
         -- Table 3: review_queue (HITL analyst triage)
         CREATE TABLE IF NOT EXISTS review_queue (
             id UUID PRIMARY KEY,
@@ -235,3 +246,13 @@ def _init_duckdb_schema(conn: duckdb.DuckDBPyConnection) -> None:
             updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     """)
+
+    # Indices: Supported on local DuckDB; gracefully skipped on cloud engines like MotherDuck
+    for idx_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_thermal_anomalies_h3 ON thermal_anomalies (h3_cell);",
+        "CREATE INDEX IF NOT EXISTS idx_thermal_anomalies_time ON thermal_anomalies (detected_at);",
+    ]:
+        try:
+            conn.execute(idx_sql)
+        except Exception as idx_err:
+            logger.debug("Index creation skipped (not supported on remote cloud engine): %s", idx_err)

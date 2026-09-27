@@ -81,13 +81,14 @@ def get_industrial_coords() -> List[Tuple[float, float]]:
     if _cached_industrial_coords is not None and len(_cached_industrial_coords) >= 40:
         return _cached_industrial_coords
     try:
-        from database import get_duckdb
+        from database import get_duckdb, db_lock
         import h3
-        conn = get_duckdb()
-        rows = conn.execute("""
-            SELECT h3_cell FROM india_master_structures 
-            WHERE facility_name IS NOT NULL OR land_use_category = 'Industry'
-        """).fetchall()
+        with db_lock:
+            conn = get_duckdb()
+            rows = conn.execute("""
+                SELECT h3_cell FROM india_master_structures 
+                WHERE facility_name IS NOT NULL OR land_use_category = 'Industry'
+            """).fetchall()
         coords = []
         for (cell_int,) in rows:
             h3_hex = hex(cell_int)[2:]

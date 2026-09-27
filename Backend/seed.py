@@ -14,7 +14,7 @@ import duckdb
 import h3
 
 from config import settings
-from database import get_duckdb, resolve_duckdb_path
+from database import get_duckdb, db_lock, safe_checkpoint, resolve_duckdb_path
 from curated_emitters import CURATED_EMITTERS
 
 logger = logging.getLogger("geoai.seed")
@@ -38,7 +38,7 @@ def inject_curated_emitters(conn: duckdb.DuckDBPyConnection) -> int:
             );
         """, [h3_int, emitter["name"], baseline_frp])
 
-    conn.execute("CHECKPOINT;")
+    safe_checkpoint(conn)
     return len(CURATED_EMITTERS)
 
 
@@ -47,12 +47,13 @@ def build_india_database(force: bool = False) -> int:
     start_time = time.perf_counter()
     logger.info("Initializing DuckDB National Strategic Facilities (%s)...", settings.DUCKDB_PATH)
 
-    conn = get_duckdb()
-    current_count = conn.execute("SELECT count(*) FROM india_master_structures WHERE facility_name IS NOT NULL;").fetchone()[0]
-    if current_count < len(CURATED_EMITTERS) or force:
-        inject_curated_emitters(conn)
+    with db_lock:
+        conn = get_duckdb()
+        current_count = conn.execute("SELECT count(*) FROM india_master_structures WHERE facility_name IS NOT NULL;").fetchone()[0]
+        if current_count < len(CURATED_EMITTERS) or force:
+            inject_curated_emitters(conn)
 
-    total = conn.execute("SELECT count(*) FROM india_master_structures;").fetchone()[0]
+        total = conn.execute("SELECT count(*) FROM india_master_structures;").fetchone()[0]
     elapsed = time.perf_counter() - start_time
     logger.info("Strategic facilities registration complete. Total facilities: %d (Elapsed: %.2fs)", total, elapsed)
     return total

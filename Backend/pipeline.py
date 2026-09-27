@@ -39,7 +39,7 @@ import uuid
 import httpx
 import h3
 from config import settings
-from database import get_duckdb
+from database import get_duckdb, db_lock, safe_checkpoint
 
 logger = logging.getLogger("geoai.pipeline")
 
@@ -244,17 +244,27 @@ async def evaluate_ker_fastpath(
 
     neighbors = list(h3.grid_disk(res7_h3, 1)) if hasattr(h3, "grid_disk") else [res7_h3]
 
-    conn = get_duckdb()
     neighbor_ints = list({int(h, 16) for h in neighbors})
     placeholders = ",".join(["?"] * len(neighbor_ints))
 
-    # 1. Exact or k-ring 1 match in india_master_structures
-    row = conn.execute(f"""
-        SELECT h3_cell, facility_name, baseline_frp_mw, land_use_category
-        FROM india_master_structures
-        WHERE h3_cell IN ({placeholders})
-        LIMIT 1;
-    """, neighbor_ints).fetchone()
+    with db_lock:
+        conn = get_duckdb()
+        # 1. Exact or k-ring 1 match in india_master_structures
+        row = conn.execute(f"""
+            SELECT h3_cell, facility_name, baseline_frp_mw, land_use_category
+            FROM india_master_structures
+            WHERE h3_cell IN ({placeholders})
+            LIMIT 1;
+        """, neighbor_ints).fetchone()
+
+        sites = []
+        if not (row and row[1] is not None):
+            # 2. Check distance to strategic emitters (within 3500m)
+            sites = conn.execute("""
+                SELECT h3_cell, facility_name, baseline_frp_mw
+                FROM india_master_structures
+                WHERE facility_name IS NOT NULL;
+            """).fetchall()
 
     matched_site = None
     if row and row[1] is not None:
@@ -265,12 +275,6 @@ async def evaluate_ker_fastpath(
             "dist": 0.0,
         }
     else:
-        # 2. Check distance to strategic emitters (within 3000m)
-        sites = conn.execute("""
-            SELECT h3_cell, facility_name, baseline_frp_mw
-            FROM india_master_structures
-            WHERE facility_name IS NOT NULL;
-        """).fetchall()
 
         closest = None
         min_dist = float("inf")
@@ -408,20 +412,21 @@ class DeterministicPipeline:
 
             # If anomaly alert triggered, push to ReviewQueue (HITL)
             if ker_result.get("alert"):
-                conn = get_duckdb()
-                conn.execute("""
-                    INSERT INTO review_queue (
-                        id, incident_id, incident_detected_at, status, priority,
-                        ai_classification, ai_confidence, reviewer_notes
-                    ) VALUES (?, ?, ?, 'pending', 'high', ?, ?, ?);
-                """, [
-                    str(uuid.uuid4()),
-                    str(incident.id),
-                    incident.detected_at,
-                    ker_result["classification"],
-                    float(ker_result["confidence"]),
-                    ker_result["notes"],
-                ])
+                with db_lock:
+                    conn = get_duckdb()
+                    conn.execute("""
+                        INSERT INTO review_queue (
+                            id, incident_id, incident_detected_at, status, priority,
+                            ai_classification, ai_confidence, reviewer_notes
+                        ) VALUES (?, ?, ?, 'pending', 'high', ?, ?, ?);
+                    """, [
+                        str(uuid.uuid4()),
+                        str(incident.id),
+                        incident.detected_at,
+                        ker_result["classification"],
+                        float(ker_result["confidence"]),
+                        ker_result["notes"],
+                    ])
 
             return ker_result
 
@@ -669,7 +674,7 @@ class DeterministicPipeline:
                     """)
                     c.unregister("batch_reviews")
 
-                c.execute("CHECKPOINT;")
+                safe_checkpoint(c)
 
         await asyncio.to_thread(_sync_pipeline_commit, updates_batch, reviews_batch)
 
