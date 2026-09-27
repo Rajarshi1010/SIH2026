@@ -77,10 +77,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 with db_lock:
                     conn = get_duckdb()
                     struct_count = conn.execute("SELECT count(*) FROM india_master_structures WHERE facility_name IS NOT NULL;").fetchone()[0]
-                    if struct_count == 0:
-                        logger.info("Initializing strategic Indian industrial facilities in DuckDB / MotherDuck...")
+                    from curated_emitters import CURATED_EMITTERS
+                    if struct_count < len(CURATED_EMITTERS):
+                        logger.info("Upgrading strategic Indian industrial facilities in DuckDB / MotherDuck (%d -> %d)...", struct_count, len(CURATED_EMITTERS))
                         from seed import build_india_database
-                        build_india_database()
+                        build_india_database(force=True)
                         struct_count = conn.execute("SELECT count(*) FROM india_master_structures WHERE facility_name IS NOT NULL;").fetchone()[0]
 
                     anomalies_count = conn.execute("SELECT count(*) FROM thermal_anomalies;").fetchone()[0]

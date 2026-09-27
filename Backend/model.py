@@ -78,7 +78,7 @@ _cached_industrial_coords: Optional[List[Tuple[float, float]]] = None
 def get_industrial_coords() -> List[Tuple[float, float]]:
     """Loads and caches lat/lon coordinates of known emitters and industrial sites from DuckDB."""
     global _cached_industrial_coords
-    if _cached_industrial_coords is not None and len(_cached_industrial_coords) >= 40:
+    if _cached_industrial_coords is not None and len(_cached_industrial_coords) > 0:
         return _cached_industrial_coords
     try:
         from database import get_duckdb, db_lock
@@ -94,11 +94,19 @@ def get_industrial_coords() -> List[Tuple[float, float]]:
             h3_hex = hex(cell_int)[2:]
             lat, lon = h3.cell_to_latlng(h3_hex)
             coords.append((lat, lon))
-        _cached_industrial_coords = coords
-        return coords
+        if coords:
+            _cached_industrial_coords = coords
+            return coords
+        from curated_emitters import CURATED_EMITTERS
+        fallback = [(e["latitude"], e["longitude"]) for e in CURATED_EMITTERS]
+        _cached_industrial_coords = fallback
+        return fallback
     except Exception as e:
         logger.warning(f"Could not load industrial coordinates from DuckDB: {e}")
-        return []
+        from curated_emitters import CURATED_EMITTERS
+        fallback = [(e["latitude"], e["longitude"]) for e in CURATED_EMITTERS]
+        _cached_industrial_coords = fallback
+        return fallback
 
 
 async def extract_features_for_incident(

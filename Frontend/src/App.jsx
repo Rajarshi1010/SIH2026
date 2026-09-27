@@ -50,7 +50,7 @@ export default function App() {
   const [selectedThreatPoint, setSelectedThreatPoint] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeCategories, setActiveCategories] = useState(() => CLASSIFICATION_KEYS);
-  const [unnaturalOnly, setUnnaturalOnly] = useState(true);
+  const [unnaturalOnly, setUnnaturalOnly] = useState(false);
   const [detailPoint, setDetailPoint] = useState(null);
   const [utcClock, setUtcClock] = useState(() => new Date().toISOString().slice(11, 19));
   const mapSectionRef = useRef(null);
@@ -617,7 +617,10 @@ export default function App() {
               className="h-2 w-2 rounded-full animate-pulse"
               style={{ backgroundColor: unnaturalOnly ? '#E63946' : '#888' }}
             />
-            {unnaturalOnly ? 'Unnatural Surges Only (Active)' : 'Filter: Unnatural Surges Only'}
+            {unnaturalOnly ? 'Filter: Unnatural Surges Only (Active)' : 'Filter: Unnatural Surges Only'}
+            <span className="font-mono text-[11px] opacity-75">
+              ({filteredWorldPoints.length}/{worldPoints.length})
+            </span>
           </button>
           {CLASSIFICATION_KEYS.map((key) => {
             const meta = CLASSIFICATIONS[key];

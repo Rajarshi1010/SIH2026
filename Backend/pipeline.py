@@ -216,16 +216,50 @@ class IncidentAdapter:
             self.h3_index = hex(self.h3_cell)[2:] if getattr(self, "h3_cell", None) else ""
 
 
+_cached_strategic_sites: Optional[List[Tuple[int, str, float, float, float]]] = None
+
+
+def get_strategic_sites() -> List[Tuple[int, str, float, float, float]]:
+    """Loads and caches strategic industrial facilities with precomputed lat/lon."""
+    global _cached_strategic_sites
+    if _cached_strategic_sites is not None and len(_cached_strategic_sites) > 0:
+        return _cached_strategic_sites
+    sites = []
+    try:
+        from database import get_duckdb, db_lock
+        with db_lock:
+            c = get_duckdb()
+            rows = c.execute("""
+                SELECT h3_cell, facility_name, baseline_frp_mw
+                FROM india_master_structures
+                WHERE facility_name IS NOT NULL;
+            """).fetchall()
+        for cell_id, fac_name, base_frp in rows:
+            fac_hex = hex(cell_id)[2:]
+            f_lat, f_lon = h3.cell_to_latlng(fac_hex)
+            sites.append((cell_id, str(fac_name), float(base_frp or 40.0), f_lat, f_lon))
+    except Exception as e:
+        logger.warning(f"Could not load strategic sites from DuckDB: {e}")
+    if not sites:
+        from curated_emitters import CURATED_EMITTERS
+        for e in CURATED_EMITTERS:
+            cell_str = h3.latlng_to_cell(e["latitude"], e["longitude"], 7)
+            cell_id = int(cell_str, 16)
+            b_frp = float(e.get("metadata", {}).get("expected_baseline_frp_mw", 40.0))
+            sites.append((cell_id, e["name"], b_frp, e["latitude"], e["longitude"]))
+    _cached_strategic_sites = sites
+    return sites
+
+
 async def evaluate_ker_fastpath(
     incident: Any,
 ) -> Optional[Dict[str, Any]]:
     """
-    Executes Layer 2 Fast-Path:
-    1. Checks H3 cell (k-ring 1 neighborhood, ~500m aperture).
-    2. Executes geodesic distance query against known emitters/structures in DuckDB.
+    Executes Layer 2 Fast-Path using pre-cached in-memory strategic facilities:
+    1. Checks H3 cell (k-ring 1 neighborhood, ~1.2-2.5km aperture).
+    2. Checks distance against known emitters (sub-millisecond in-memory).
     3. If matched, calculates FRP Z-score.
     """
-    # Step 1: H3 neighborhood check (Master structures indexed at Resolution 7)
     incident_h3 = getattr(incident, "h3_index", None)
     if not incident_h3 or not (hasattr(h3, "is_valid_cell") and h3.is_valid_cell(str(incident_h3))):
         incident_h3 = h3.latlng_to_cell(
@@ -243,44 +277,27 @@ async def evaluate_ker_fastpath(
         res7_h3 = h3.latlng_to_cell(incident.latitude, incident.longitude, 7)
 
     neighbors = list(h3.grid_disk(res7_h3, 1)) if hasattr(h3, "grid_disk") else [res7_h3]
+    neighbor_set = {int(h, 16) for h in neighbors}
 
-    neighbor_ints = list({int(h, 16) for h in neighbors})
-    placeholders = ",".join(["?"] * len(neighbor_ints))
-
-    with db_lock:
-        conn = get_duckdb()
-        # 1. Exact or k-ring 1 match in india_master_structures
-        row = conn.execute(f"""
-            SELECT h3_cell, facility_name, baseline_frp_mw, land_use_category
-            FROM india_master_structures
-            WHERE h3_cell IN ({placeholders})
-            LIMIT 1;
-        """, neighbor_ints).fetchone()
-
-        sites = []
-        if not (row and row[1] is not None):
-            # 2. Check distance to strategic emitters (within 3500m)
-            sites = conn.execute("""
-                SELECT h3_cell, facility_name, baseline_frp_mw
-                FROM india_master_structures
-                WHERE facility_name IS NOT NULL;
-            """).fetchall()
+    sites = get_strategic_sites()
 
     matched_site = None
-    if row and row[1] is not None:
-        matched_site = {
-            "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, str(row[0]))),
-            "name": row[1] or "Industrial Facility",
-            "baseline_frp": float(row[2] or 40.0),
-            "dist": 0.0,
-        }
-    else:
+    # 1. Exact or k-ring 1 match in cached strategic facilities
+    for cell_id, fac_name, base_frp, f_lat, f_lon in sites:
+        if cell_id in neighbor_set:
+            matched_site = {
+                "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, str(cell_id))),
+                "name": fac_name or "Industrial Facility",
+                "baseline_frp": base_frp,
+                "dist": 0.0,
+            }
+            break
 
+    # 2. Check distance to strategic emitters (within 3500m)
+    if not matched_site:
         closest = None
         min_dist = float("inf")
-        for cell_id, fac_name, base_frp in sites:
-            fac_hex = hex(cell_id)[2:]
-            f_lat, f_lon = h3.cell_to_latlng(fac_hex)
+        for cell_id, fac_name, base_frp, f_lat, f_lon in sites:
             d_m = _haversine_distance_m(incident.latitude, incident.longitude, f_lat, f_lon)
             if d_m < min_dist:
                 min_dist = d_m
@@ -634,49 +651,57 @@ class DeterministicPipeline:
                 "raw_metadata": json.dumps(inc.raw_metadata),
             })
 
-        # Synchronous batch update in thread pool to avoid blocking the event loop
-        def _sync_pipeline_commit(u_list, r_list):
-            import pyarrow as pa
-            from database import get_duckdb, db_lock
-
+        # Direct atomic batch update with executemany in same thread to prevent MotherDuck deadlocks
+        if updates_batch:
             with db_lock:
                 c = get_duckdb()
-                if u_list:
-                    u_table = pa.Table.from_pylist(u_list)
-                    c.register("batch_pipeline_updates", u_table)
-                    c.execute("""
-                        UPDATE thermal_anomalies
-                        SET
-                            classification = bpu.classification::hazard_class,
-                            classification_confidence = bpu.classification_confidence::UTINYINT,
-                            is_industrial = bpu.is_industrial::BOOLEAN,
-                            emitter_id = bpu.emitter_id::UUID,
-                            distance_to_emitter_meters = bpu.distance_to_emitter_meters::FLOAT,
-                            raw_metadata = bpu.raw_metadata::JSON
-                        FROM batch_pipeline_updates bpu
-                        WHERE thermal_anomalies.id = bpu.id::UUID;
-                    """)
-                    c.unregister("batch_pipeline_updates")
+                update_params = [
+                    (
+                        u["classification"],
+                        u["classification_confidence"],
+                        u["is_industrial"],
+                        u["emitter_id"],
+                        u["distance_to_emitter_meters"],
+                        u["raw_metadata"],
+                        u["id"],
+                    )
+                    for u in updates_batch
+                ]
+                c.executemany("""
+                    UPDATE thermal_anomalies
+                    SET
+                        classification = ?::hazard_class,
+                        classification_confidence = ?::UTINYINT,
+                        is_industrial = ?,
+                        emitter_id = ?::UUID,
+                        distance_to_emitter_meters = ?,
+                        raw_metadata = ?::JSON
+                    WHERE id = ?::UUID;
+                """, update_params)
 
-                if r_list:
-                    r_table = pa.Table.from_pylist(r_list)
-                    c.register("batch_reviews", r_table)
-                    c.execute("""
+                if reviews_batch:
+                    review_params = [
+                        (
+                            r["id"],
+                            r["incident_id"],
+                            r["incident_detected_at"],
+                            r["status"],
+                            r["priority"],
+                            r["ai_classification"],
+                            r["ai_confidence"],
+                            r["reviewer_notes"],
+                        )
+                        for r in reviews_batch
+                    ]
+                    c.executemany("""
                         INSERT INTO review_queue (
                             id, incident_id, incident_detected_at, status, priority,
                             ai_classification, ai_confidence, reviewer_notes
-                        )
-                        SELECT
-                            id::UUID, incident_id::UUID, incident_detected_at::TIMESTAMPTZ,
-                            status::VARCHAR, priority::VARCHAR, ai_classification::VARCHAR,
-                            ai_confidence::FLOAT, reviewer_notes::TEXT
-                        FROM batch_reviews;
-                    """)
-                    c.unregister("batch_reviews")
+                        ) VALUES (?::UUID, ?::UUID, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?);
+                    """, review_params)
 
                 safe_checkpoint(c)
-
-        await asyncio.to_thread(_sync_pipeline_commit, updates_batch, reviews_batch)
+            logger.info("Batch pipeline commit complete: updated %d thermal incidents.", len(updates_batch))
 
         return {
             "status": "success",
