@@ -513,22 +513,48 @@ class DeterministicPipeline:
         # 4. Layer 4: Residual Machine Learning Classifier (LightGBM + TreeSHAP)
         from model import residual_classifier
         ml_res = await residual_classifier.classify_incident(incident)
-        
-        # 4. Layer 5: Conditional Multi-Tier Verification for High-Risk Inferences
+
+        predicted_class = ml_res["predicted_class"]
+        confidence_val = float(ml_res["confidence"])
+        is_industrial_val = bool(ml_res["is_industrial"])
+
+        # Gating check: Distinguish verified high-intensity Wildfires from unverified new spots
+        if predicted_class == "WILDFIRE_FOREST_FIRE" and frp_val < 25.0:
+            predicted_class = "UNVERIFIED_THERMAL_HOTSPOT"
+            confidence_val = 0.85
+            is_industrial_val = False
+            notes_detail = (
+                f"Isolated thermal hotspot with no prior historical telemetry (FRP={frp_val:.1f}MW < 25MW). "
+                f"Tagged for temporal baseline tracking."
+            )
+        else:
+            notes_detail = "Classified via Layer 4 LightGBM + TreeSHAP explainability engine."
+
+        incident.classification = predicted_class
+        incident.classification_confidence = confidence_val
+        incident.is_industrial = is_industrial_val
+
+        meta = dict(getattr(incident, "raw_metadata", None) or {})
+        meta.update({
+            "pipeline_stage": "LAYER_4_ML_SHAP",
+            "shap_attribution": ml_res.get("shap_attribution", {}),
+            "notes": notes_detail,
+        })
+        incident.raw_metadata = meta
+
+        # 5. Layer 5: Conditional Multi-Tier Verification for High-Risk Inferences
         # Triggers exclusively for critical Unmapped Industrial Accidents
-        if ml_res["predicted_class"] == "UNMAPPED_INDUSTRIAL_ACCIDENT":
+        if predicted_class == "UNMAPPED_INDUSTRIAL_ACCIDENT":
             verification = await verify_incident_burn_scar(
                 incident.latitude, incident.longitude, incident.detected_at
             )
-            meta = dict(getattr(incident, "raw_metadata", None) or {})
             meta["layer_5_verification"] = verification
             incident.raw_metadata = meta
 
-            # Queue ReviewQueue entry with verification context
-            priority_val = "high" if ml_res["predicted_class"] == "UNMAPPED_INDUSTRIAL_ACCIDENT" else "medium"
+            priority_val = "high"
             notes_val = (
-                f"Layer 4 ML routed to HITL: Class={ml_res['predicted_class']}, "
-                f"Conf={ml_res['confidence']:.2f}. "
+                f"Layer 4 ML routed to HITL: Class={predicted_class}, "
+                f"Conf={confidence_val:.2f}. "
                 f"Layer 5 Verification: Tier={verification.get('tier')}, Status={verification.get('status')}"
             )
             review_entry = {
@@ -537,19 +563,19 @@ class DeterministicPipeline:
                 "incident_detected_at": incident.detected_at,
                 "status": "pending",
                 "priority": priority_val,
-                "ai_classification": ml_res["predicted_class"],
-                "ai_confidence": float(ml_res["confidence"]),
+                "ai_classification": predicted_class,
+                "ai_confidence": confidence_val,
                 "reviewer_notes": notes_val,
             }
         else:
             review_entry = None
 
         return {
-            "classification": ml_res["predicted_class"],
-            "confidence": ml_res["confidence"],
-            "is_industrial": ml_res["is_industrial"],
-            "shap_attribution": ml_res["shap_attribution"],
-            "notes": "Classified via Layer 4 LightGBM + TreeSHAP explainability engine.",
+            "classification": predicted_class,
+            "confidence": confidence_val,
+            "is_industrial": is_industrial_val,
+            "shap_attribution": ml_res.get("shap_attribution", {}),
+            "notes": notes_detail,
             "review_entry": review_entry,
         }
 

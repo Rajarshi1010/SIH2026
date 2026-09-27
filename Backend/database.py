@@ -175,6 +175,7 @@ def _init_duckdb_schema(conn: duckdb.DuckDBPyConnection) -> None:
             'AGRICULTURAL_STUBBLE_FIRE',
             'WILDFIRE_FOREST_FIRE',
             'FALSE_POSITIVE_GLINT',
+            'UNVERIFIED_THERMAL_HOTSPOT',
             'unclassified'
         );
 
@@ -256,3 +257,34 @@ def _init_duckdb_schema(conn: duckdb.DuckDBPyConnection) -> None:
             conn.execute(idx_sql)
         except Exception as idx_err:
             logger.debug("Index creation skipped (not supported on remote cloud engine): %s", idx_err)
+
+    # Auto-migrate enum on legacy tables if UNVERIFIED_THERMAL_HOTSPOT is missing
+    try:
+        enums = conn.execute("SELECT enum_range(NULL::hazard_class);").fetchone()[0]
+        if "UNVERIFIED_THERMAL_HOTSPOT" not in enums:
+            logger.info("Migrating DuckDB hazard_class enum to add UNVERIFIED_THERMAL_HOTSPOT...")
+            conn.execute("DROP INDEX IF EXISTS idx_thermal_anomalies_h3;")
+            conn.execute("DROP INDEX IF EXISTS idx_thermal_anomalies_time;")
+            conn.execute("""
+                CREATE TYPE IF NOT EXISTS hazard_class_v2 AS ENUM (
+                    'PERSISTENT_INDUSTRIAL_SOURCE',
+                    'ROUTINE_GAS_FLARE',
+                    'INDUSTRIAL_FIRE_ALERT',
+                    'UNMAPPED_INDUSTRIAL_ACCIDENT',
+                    'AGRICULTURAL_STUBBLE_FIRE',
+                    'WILDFIRE_FOREST_FIRE',
+                    'FALSE_POSITIVE_GLINT',
+                    'UNVERIFIED_THERMAL_HOTSPOT',
+                    'unclassified'
+                );
+                ALTER TABLE thermal_anomalies ALTER COLUMN classification TYPE hazard_class_v2;
+                DROP TYPE hazard_class;
+                CREATE TYPE hazard_class AS ENUM (SELECT unnest(enum_range(NULL::hazard_class_v2)));
+                ALTER TABLE thermal_anomalies ALTER COLUMN classification TYPE hazard_class;
+                DROP TYPE hazard_class_v2;
+                CREATE INDEX IF NOT EXISTS idx_thermal_anomalies_h3 ON thermal_anomalies (h3_cell);
+                CREATE INDEX IF NOT EXISTS idx_thermal_anomalies_time ON thermal_anomalies (detected_at);
+            """)
+            logger.info("hazard_class enum migration completed.")
+    except Exception as mig_err:
+        logger.debug("Enum migration check skipped: %s", mig_err)

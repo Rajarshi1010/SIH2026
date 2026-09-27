@@ -593,7 +593,8 @@ Every thermal event is mapped to NTRO-mandated color specifications in [Frontend
 | `PERSISTENT_INDUSTRIAL_SOURCE` | `#7209B7` | Purple | Routine | Verified baseline industrial emitter (refinery, steel plant, smelter) |
 | `ROUTINE_GAS_FLARE` | `#F77F00` | Orange | Routine | High-temperature gas flare operating within normal physical parameters |
 | `AGRICULTURAL_STUBBLE_FIRE` | `#FCBF49` | Amber / Yellow | Low | Seasonal post-harvest crop residue burn (Punjab, Haryana, etc.) |
-| `WILDFIRE_FOREST_FIRE` | `#2A9D8F` | Teal / Forest Green | High | Vegetative forest wildfire |
+| `WILDFIRE_FOREST_FIRE` | `#2A9D8F` | Teal / Forest Green | High | High-intensity vegetative forest wildfire (FRP >= 25 MW) |
+| `UNVERIFIED_THERMAL_HOTSPOT` | `#E07A5F` | Terracotta / Coral Amber | Investigating | Isolated new hotspot lacking historical telemetry (FRP < 25 MW) |
 | `FALSE_POSITIVE_GLINT` | `#A8DADC` | Pale Cyan | Noise | Specular solar reflection from rooftop solar arrays or water bodies |
 | `unclassified` | `#6C757D` | Slate Gray | Neutral | Ingested satellite anomaly awaiting pipeline classification |
 

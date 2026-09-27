@@ -549,6 +549,7 @@ COLOR_MAP = {
     "ROUTINE_GAS_FLARE": "#F77F00",             # Orange (Regulated Hydrocarbon Flare)
     "AGRICULTURAL_STUBBLE_FIRE": "#FCBF49",     # Yellow (Crop Biomass Burn)
     "WILDFIRE_FOREST_FIRE": "#2A9D8F",          # Teal/Green (Vegetation/Forest)
+    "UNVERIFIED_THERMAL_HOTSPOT": "#E07A5F",    # Amber-Terracotta (Single-pass new detection)
     "FALSE_POSITIVE_GLINT": "#A8DADC",          # Pale Blue (Solar Reflection)
     "unclassified": "#6C757D",                  # Neutral Gray
 }

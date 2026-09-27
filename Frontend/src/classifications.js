@@ -48,6 +48,13 @@ export const CLASSIFICATIONS = {
     meaning: 'Forest / wildland vegetation fire',
     priority: 'High',
   },
+  UNVERIFIED_THERMAL_HOTSPOT: {
+    color: '#E07A5F',
+    label: 'Unverified Hotspot',
+    short: 'New Hotspot',
+    meaning: 'New thermal detection lacking historical telemetry baseline',
+    priority: 'Investigating',
+  },
   FALSE_POSITIVE_GLINT: {
     color: '#A8DADC',
     label: 'False Positive (Glint)',

@@ -23,20 +23,24 @@ logger = logging.getLogger("geoai.seed")
 def inject_curated_emitters(conn: duckdb.DuckDBPyConnection) -> int:
     """Injects high-precision strategic industrial complexes with verified baselines."""
     logger.info("Registering %d strategic Indian industrial facilities...", len(CURATED_EMITTERS))
+    conn.execute("DELETE FROM india_master_structures WHERE facility_name IS NOT NULL;")
+
+    params = []
     for emitter in CURATED_EMITTERS:
         lat = emitter["latitude"]
         lon = emitter["longitude"]
         h3_cell_str = h3.latlng_to_cell(lat, lon, 7)
         h3_int = int(h3_cell_str, 16)
         baseline_frp = float(emitter.get("metadata", {}).get("expected_baseline_frp_mw", 40.0))
+        params.append((h3_int, emitter["name"], baseline_frp))
 
-        conn.execute("""
-            INSERT OR REPLACE INTO india_master_structures (
-                h3_cell, land_use_category, facility_name, baseline_frp_mw, power_sites
-            ) VALUES (
-                ?, 'Industry'::land_category, ?, ?, 1
-            );
-        """, [h3_int, emitter["name"], baseline_frp])
+    conn.executemany("""
+        INSERT INTO india_master_structures (
+            h3_cell, land_use_category, facility_name, baseline_frp_mw, power_sites
+        ) VALUES (
+            ?, 'Industry'::land_category, ?, ?, 1
+        );
+    """, params)
 
     safe_checkpoint(conn)
     return len(CURATED_EMITTERS)
