@@ -78,7 +78,7 @@ _cached_industrial_coords: Optional[List[Tuple[float, float]]] = None
 def get_industrial_coords() -> List[Tuple[float, float]]:
     """Loads and caches lat/lon coordinates of known emitters and industrial sites from DuckDB."""
     global _cached_industrial_coords
-    if _cached_industrial_coords is not None:
+    if _cached_industrial_coords is not None and len(_cached_industrial_coords) >= 40:
         return _cached_industrial_coords
     try:
         from database import get_duckdb
@@ -154,45 +154,49 @@ async def extract_features_for_incident(
 # ------------------------------------------------------------------------------
 # 2. Zero-Cost Synthetic Domain Training Engine
 # ------------------------------------------------------------------------------
-def generate_synthetic_training_data(n_samples: int = 1500) -> Tuple[np.ndarray, np.ndarray]:
+def generate_synthetic_training_data(n_samples: int = 2000) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generates domain-grounded synthetic training data matching the physical
     distributions of Indian fire types for instant CPU cold-start training:
-    - 0: AGRICULTURAL_STUBBLE_FIRE (Punjab/Haryana: high daytime, low/moderate FRP, distant from factories)
-    - 1: WILDFIRE_FOREST_FIRE (Central/NE forests: moderate night/day, high pixel area, distant from factories)
-    - 2: UNMAPPED_INDUSTRIAL_ACCIDENT (Extremely high FRP surge, high bright_ratio, near or moderate to industrial zones)
-    - 3: PERSISTENT_INDUSTRIAL_SOURCE (Close to industrial points, 24/7 day+night persistence, moderate/high FRP)
+    - 0: AGRICULTURAL_STUBBLE_FIRE (Across India: diurnal, low/moderate FRP 2-25MW, widespread rural distance)
+    - 1: WILDFIRE_FOREST_FIRE (Dense vegetation/forests: high FRP 20-100+MW, night+day persistence, high brightness)
+    - 2: UNMAPPED_INDUSTRIAL_ACCIDENT (Violent FRP surge > 55MW, extreme combustion radiance, near industrial corridors)
+    - 3: PERSISTENT_INDUSTRIAL_SOURCE (Inside facility perimeter <= 2.5km, 24/7 continuous operations)
     """
     np.random.seed(42)
     n_per_class = n_samples // 4
 
-    # Class 0: Agricultural Stubble
-    ag_frp = np.random.exponential(scale=12.0, size=n_per_class) + 2.0
-    ag_mir = np.random.normal(loc=330.0, scale=15.0, size=n_per_class)
-    ag_ratio = np.random.normal(loc=1.08, scale=0.04, size=n_per_class)
-    ag_dist = np.random.uniform(low=8.0, high=60.0, size=n_per_class)
-    ag_night = np.random.choice([0.0, 1.0], size=n_per_class, p=[0.92, 0.08]) # Stubble is overwhelmingly daytime
+    # Class 0: Agricultural Stubble Fire
+    # Crop residue fires across India: low/moderate FRP (2 to 25 MW, median ~10 MW)
+    # Overwhelmingly diurnal (96% daytime). Can occur 5 km to 500+ km from industrial zones.
+    ag_frp = np.random.exponential(scale=10.0, size=n_per_class) + 2.0
+    ag_mir = np.random.normal(loc=328.0, scale=12.0, size=n_per_class)
+    ag_ratio = np.random.normal(loc=1.06, scale=0.04, size=n_per_class)
+    ag_dist = np.random.uniform(low=5.0, high=500.0, size=n_per_class)
+    ag_night = np.random.choice([0.0, 1.0], size=n_per_class, p=[0.96, 0.04])
     ag_z = (ag_frp - 15.0) / 20.0
-    ag_area = np.random.uniform(low=0.14, high=0.8, size=n_per_class)
+    ag_area = np.random.uniform(low=0.12, high=0.45, size=n_per_class)
     X_ag = np.column_stack([ag_frp, ag_mir, ag_ratio, ag_dist, ag_night, ag_z, ag_area])
     y_ag = np.zeros(n_per_class, dtype=int)
 
     # Class 1: Wildfire / Forest Fire
-    wf_frp = np.random.exponential(scale=28.0, size=n_per_class) + 5.0
-    wf_mir = np.random.normal(loc=345.0, scale=20.0, size=n_per_class)
-    wf_ratio = np.random.normal(loc=1.12, scale=0.05, size=n_per_class)
-    wf_dist = np.random.uniform(low=15.0, high=100.0, size=n_per_class)
-    wf_night = np.random.choice([0.0, 1.0], size=n_per_class, p=[0.55, 0.45])
+    # Forest blazes have high fuel loads, higher FRP (median 35-70 MW), high brightness, and sustained night burning
+    wf_frp = np.random.exponential(scale=35.0, size=n_per_class) + 18.0
+    wf_mir = np.random.normal(loc=350.0, scale=18.0, size=n_per_class)
+    wf_ratio = np.random.normal(loc=1.14, scale=0.05, size=n_per_class)
+    wf_dist = np.random.uniform(low=15.0, high=500.0, size=n_per_class)
+    wf_night = np.random.choice([0.0, 1.0], size=n_per_class, p=[0.50, 0.50]) # Burns 24/7 day and night
     wf_z = (wf_frp - 15.0) / 20.0
-    wf_area = np.random.uniform(low=0.2, high=1.2, size=n_per_class)
+    wf_area = np.random.uniform(low=0.25, high=1.2, size=n_per_class)
     X_wf = np.column_stack([wf_frp, wf_mir, wf_ratio, wf_dist, wf_night, wf_z, wf_area])
     y_wf = np.ones(n_per_class, dtype=int)
 
     # Class 2: Unmapped Industrial Fire / Chemical Explosion
-    ind_acc_frp = np.random.exponential(scale=85.0, size=n_per_class) + 40.0
-    ind_acc_mir = np.random.normal(loc=395.0, scale=30.0, size=n_per_class)
-    ind_acc_ratio = np.random.normal(loc=1.25, scale=0.08, size=n_per_class)
-    ind_acc_dist = np.random.uniform(low=0.2, high=6.0, size=n_per_class)
+    # Severe catastrophic surge (FRP 60 to 250+ MW, extreme MIR, within 15 km of industrial clusters)
+    ind_acc_frp = np.random.exponential(scale=85.0, size=n_per_class) + 55.0
+    ind_acc_mir = np.random.normal(loc=395.0, scale=28.0, size=n_per_class)
+    ind_acc_ratio = np.random.normal(loc=1.26, scale=0.08, size=n_per_class)
+    ind_acc_dist = np.random.uniform(low=0.2, high=15.0, size=n_per_class)
     ind_acc_night = np.random.choice([0.0, 1.0], size=n_per_class, p=[0.5, 0.5])
     ind_acc_z = (ind_acc_frp - 15.0) / 20.0
     ind_acc_area = np.random.uniform(low=0.14, high=0.6, size=n_per_class)
@@ -200,11 +204,12 @@ def generate_synthetic_training_data(n_samples: int = 1500) -> Tuple[np.ndarray,
     y_acc = np.full(n_per_class, 2, dtype=int)
 
     # Class 3: Persistent Industrial Source
+    # Routine flaring / furnaces: moderate to high FRP, within facility perimeter (dist <= 2.5 km)
     ind_src_frp = np.random.normal(loc=45.0, scale=18.0, size=n_per_class)
     ind_src_mir = np.random.normal(loc=365.0, scale=22.0, size=n_per_class)
     ind_src_ratio = np.random.normal(loc=1.18, scale=0.06, size=n_per_class)
-    ind_src_dist = np.random.uniform(low=0.0, high=1.5, size=n_per_class)
-    ind_src_night = np.random.choice([0.0, 1.0], size=n_per_class, p=[0.48, 0.52]) # Continuous 24/7
+    ind_src_dist = np.random.uniform(low=0.0, high=2.5, size=n_per_class)
+    ind_src_night = np.random.choice([0.0, 1.0], size=n_per_class, p=[0.48, 0.52])
     ind_src_z = (ind_src_frp - 15.0) / 20.0
     ind_src_area = np.random.uniform(low=0.14, high=0.5, size=n_per_class)
     X_src = np.column_stack([ind_src_frp, ind_src_mir, ind_src_ratio, ind_src_dist, ind_src_night, ind_src_z, ind_src_area])

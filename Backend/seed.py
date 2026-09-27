@@ -49,7 +49,7 @@ def build_india_database(force: bool = False) -> int:
 
     conn = get_duckdb()
     current_count = conn.execute("SELECT count(*) FROM india_master_structures WHERE facility_name IS NOT NULL;").fetchone()[0]
-    if current_count == 0 or force:
+    if current_count < len(CURATED_EMITTERS) or force:
         inject_curated_emitters(conn)
 
     total = conn.execute("SELECT count(*) FROM india_master_structures;").fetchone()[0]

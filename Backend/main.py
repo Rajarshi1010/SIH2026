@@ -290,7 +290,7 @@ async def health_check() -> JSONResponse:
     "/telemetry/ingest",
     status_code=status.HTTP_200_OK,
     summary="Trigger Satellite Telemetry Ingestion (Layer 1)",
-    description="Fetches live FIRMS thermal telemetry, executes DEFM footprint modeling, calculates H3 indexes, and upserts to TimescaleDB.",
+    description="Fetches live FIRMS thermal telemetry, executes DEFM footprint modeling, calculates H3 indexes, and stores in DuckDB.",
 )
 async def trigger_ingest(
     source: str = "VIIRS_SNPP_NRT",
@@ -573,7 +573,7 @@ async def get_gis_feature_collection(
         clauses.append("classification = ?")
         params.append(classification)
     if unnatural_only:
-        clauses.append("classification IN ('INDUSTRIAL_FIRE_ALERT', 'UNMAPPED_INDUSTRIAL_ACCIDENT', 'WILDFIRE_FOREST_FIRE')")
+        clauses.append("(classification IN ('INDUSTRIAL_FIRE_ALERT', 'UNMAPPED_INDUSTRIAL_ACCIDENT') OR (classification = 'WILDFIRE_FOREST_FIRE' AND frp >= 25))")
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
@@ -599,7 +599,8 @@ async def get_gis_feature_collection(
         h3_hex = hex(r[1])[2:] if r[1] else ""
         conf_val = float(r[10]) / 100.0 if r[10] > 1 else float(r[10] or 0.0)
         z_score = float(raw_meta.get("frp_z_score") or 0.0)
-        is_unnatural = c_type in ["INDUSTRIAL_FIRE_ALERT", "UNMAPPED_INDUSTRIAL_ACCIDENT", "WILDFIRE_FOREST_FIRE"] or z_score >= 2.0
+        frp_val = float(r[6] or 0.0)
+        is_unnatural = c_type in ["INDUSTRIAL_FIRE_ALERT", "UNMAPPED_INDUSTRIAL_ACCIDENT"] or (c_type == "WILDFIRE_FOREST_FIRE" and frp_val >= 25.0) or z_score >= 2.0
 
         features.append({
             "type": "Feature",

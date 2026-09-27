@@ -282,7 +282,7 @@ async def evaluate_ker_fastpath(
                 min_dist = d_m
                 closest = (cell_id, fac_name, base_frp, d_m)
 
-        if closest and closest[3] <= 3000.0:
+        if closest and closest[3] <= 3500.0:
             matched_site = {
                 "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, str(closest[0]))),
                 "name": closest[1],
@@ -295,7 +295,7 @@ async def evaluate_ker_fastpath(
         frp_std_dev = max(baseline_frp * 0.35, 5.0)
         frp_z_score = (float(incident.frp) - baseline_frp) / frp_std_dev
 
-        if frp_z_score >= 2.5:
+        if frp_z_score >= 2.0:
             return {
                 "matched": True,
                 "emitter_id": matched_site["id"],
@@ -441,7 +441,54 @@ class DeterministicPipeline:
             incident.raw_metadata = meta
             return pyro_result
 
-        # 3. Layer 4: Residual Machine Learning Classifier (LightGBM + TreeSHAP)
+        # 3. Layer 3b: Physical Pre-Classification Gating for Rural Biomass & Glint Noise
+        from model import extract_features_for_incident
+        feat_vec, feat_dict = await extract_features_for_incident(incident)
+        dist_km = feat_dict.get("distance_to_industrial_km", 50.0)
+        is_night = feat_dict.get("is_night", 0.0)
+        frp_val = float(incident.frp or 0.0)
+        mir_val = float(incident.brightness or 300.0)
+
+        # 3b-1. Solar Specular Glint / Low-Intensity Noise Filter
+        # Small daytime hotspot with very low FRP (< 3.0 MW) and low confidence or low temperature
+        if is_night == 0.0 and frp_val < 3.0 and (str(incident.confidence or "").lower() in ("low", "l") or mir_val < 325.0):
+            incident.classification = "FALSE_POSITIVE_GLINT"
+            incident.classification_confidence = 0.88
+            incident.is_industrial = False
+            meta = dict(getattr(incident, "raw_metadata", None) or {})
+            meta.update({
+                "pipeline_stage": "LAYER_3_GLINT_GATE",
+                "notes": f"Low-intensity solar glint / noise filter (FRP={frp_val:.1f}MW, T={mir_val:.1f}K)",
+            })
+            incident.raw_metadata = meta
+            return {
+                "classification": "FALSE_POSITIVE_GLINT",
+                "confidence": 0.88,
+                "is_industrial": False,
+                "notes": "Low-intensity solar reflection or thermal noise.",
+            }
+
+        # 3b-2. Diurnal Rural Biomass / Agricultural Stubble Filter
+        # Across rural India (> 2.5 km from industrial facilities), daytime low-to-moderate thermal detections
+        # (FRP < 15.0 MW, MIR < 345 K) are open-field agricultural stubble or rural biomass burning, NOT forest wildfires!
+        if is_night == 0.0 and frp_val < 15.0 and mir_val < 345.0 and dist_km > 2.5:
+            incident.classification = "AGRICULTURAL_STUBBLE_FIRE"
+            incident.classification_confidence = 0.92
+            incident.is_industrial = False
+            meta = dict(getattr(incident, "raw_metadata", None) or {})
+            meta.update({
+                "pipeline_stage": "LAYER_3_RURAL_BIOMASS_GATE",
+                "notes": f"Diurnal agricultural residue burn (FRP={frp_val:.1f}MW, T={mir_val:.1f}K, dist={dist_km:.1f}km)",
+            })
+            incident.raw_metadata = meta
+            return {
+                "classification": "AGRICULTURAL_STUBBLE_FIRE",
+                "confidence": 0.92,
+                "is_industrial": False,
+                "notes": "Diurnal agricultural residue or crop biomass burn.",
+            }
+
+        # 4. Layer 4: Residual Machine Learning Classifier (LightGBM + TreeSHAP)
         from model import residual_classifier
         ml_res = await residual_classifier.classify_incident(incident)
         
